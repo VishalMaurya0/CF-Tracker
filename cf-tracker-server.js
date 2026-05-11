@@ -124,60 +124,72 @@ const requireAuth = async (req, res, next) => {
     next();
 };
 
+const jwt = require("jsonwebtoken");
+
+const generateToken = (user) => {
+    return jwt.sign(
+        { handle: user.handle },
+        process.env.JWT_SECRET,
+        { expiresIn: "7d" }
+    );
+};
+
 // ─── ROUTE: POST /api/auth/set-password ──────────────────────────────────────
-        // Set password for first time, or change it (requires old password if one exists)
-        app.post("/api/auth/set-password", async (req, res) => {
-            const { handle, oldPassword, newPassword } = req.body;
-            if (!handle || !newPassword) {
-                return res.status(400).json({ error: "handle and newPassword required." });
-            }
-            if (newPassword.length < 4) {
-                return res.status(400).json({ error: "Password must be at least 4 characters." });
-            }
-            try {
-                const settings = await UserSettings.findOne({ myHandle: handle });
-                if (!settings) return res.status(404).json({ error: "Run /api/setup first." });
+// Set password for first time, or change it (requires old password if one exists)
+app.post("/api/auth/set-password", async (req, res) => {
+    const { handle, oldPassword, newPassword } = req.body;
+    if (!handle || !newPassword) {
+        return res.status(400).json({ error: "handle and newPassword required." });
+    }
+    if (newPassword.length < 4) {
+        return res.status(400).json({ error: "Password must be at least 4 characters." });
+    }
+    try {
+        const settings = await UserSettings.findOne({ myHandle: handle });
+        if (!settings) return res.status(404).json({ error: "Run /api/setup first." });
+
+        // If password already set, verify old password
+        if (settings.passwordHash) {
+            if (!oldPassword) return res.status(401).json({ error: "Current password required to change password." });
+            const match = await bcrypt.compare(oldPassword, settings.passwordHash);
+            if (!match) return res.status(401).json({ error: "Current password incorrect." });
+        }
+
+        const hash = await bcrypt.hash(newPassword, 10);
+        await UserSettings.findOneAndUpdate({ myHandle: handle }, { passwordHash: hash });
+
+        res.json({ success: true, message: "Password updated." });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+
+// ─── ROUTE: POST /api/auth/login ─────────────────────────────────────────────
+// Verify handle + password, returns whether account has a password set
+app.post("/api/auth/login", async (req, res) => {
+    const { handle, password } = req.body;
+    if (!handle) return res.status(400).json({ error: "handle required." });
+    try {
+        const settings = await UserSettings.findOne({ myHandle: handle });
+        if (!settings) return res.status(404).json({ error: "Handle not found. Run setup first." });
         
-                // If password already set, verify old password
-                if (settings.passwordHash) {
-                    if (!oldPassword) return res.status(401).json({ error: "Current password required to change password." });
-                    const match = await bcrypt.compare(oldPassword, settings.passwordHash);
-                    if (!match) return res.status(401).json({ error: "Current password incorrect." });
-                }
+        if (!settings.passwordHash) {
+            // No password set — log them straight in, prompt to set one
+            return res.json({ success: true, noPasswordSet: true });
+        }
         
-                const hash = await bcrypt.hash(newPassword, 10);
-                await UserSettings.findOneAndUpdate({ myHandle: handle }, { passwordHash: hash });
+        if (!password) return res.status(401).json({ error: "Password required.", needsPassword: true });
         
-                res.json({ success: true, message: "Password updated." });
-            } catch (err) {
-                res.status(500).json({ error: err.message });
-            }
-        });
+        const match = await bcrypt.compare(password, settings.passwordHash);
+        if (!match) return res.status(401).json({ error: "Incorrect password." });
         
-        // ─── ROUTE: POST /api/auth/login ─────────────────────────────────────────────
-        // Verify handle + password, returns whether account has a password set
-        app.post("/api/auth/login", async (req, res) => {
-            const { handle, password } = req.body;
-            if (!handle) return res.status(400).json({ error: "handle required." });
-            try {
-                const settings = await UserSettings.findOne({ myHandle: handle });
-                if (!settings) return res.status(404).json({ error: "Handle not found. Run setup first." });
-        
-                if (!settings.passwordHash) {
-                    // No password set — log them straight in, prompt to set one
-                    return res.json({ success: true, noPasswordSet: true });
-                }
-        
-                if (!password) return res.status(401).json({ error: "Password required.", needsPassword: true });
-        
-                const match = await bcrypt.compare(password, settings.passwordHash);
-                if (!match) return res.status(401).json({ error: "Incorrect password." });
-        
-                res.json({ success: true });
-            } catch (err) {
-                res.status(500).json({ error: err.message });
-            }
-        });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 
 // ─── Helper: fetch from Codeforces API ───────────────────────────────────────
@@ -375,6 +387,7 @@ const rebuildBacklog = async (myHandle) => {
         practiceRating,
     };
 };
+
 
 // ─── ROUTE 1: POST /api/setup ─────────────────────────────────────────────────
 // Save your CF handle, friends, and practice rating
@@ -597,60 +610,60 @@ app.post("/api/friends/sync", requireAuth, async (req, res) => {
 // ─── ROUTE 2: GET /api/backlog?handle=YOUR_HANDLE ─────────────────────────────
 // Fetch all problems friends solved/attempted that you haven't solved
 app.get("/api/backlog", requireAuth, async (req, res) => {
-  const { handle } = req.query;
-  if (!handle) return res.status(400).json({ error: "handle required." });
+    const { handle } = req.query;
+    if (!handle) return res.status(400).json({ error: "handle required." });
 
-  try {
-    const settings = await UserSettings.findOne({ myHandle: handle });
-    if (!settings) return res.status(404).json({ error: "Run /api/setup first." });
+    try {
+        const settings = await UserSettings.findOne({ myHandle: handle });
+        if (!settings) return res.status(404).json({ error: "Run /api/setup first." });
 
-    const { practiceRating, friendHandles } = settings;
+        const { practiceRating, friendHandles } = settings;
 
-    // Get user's solved keys
-    const myCache = await UserSolvedCache.findOne({ myHandle: handle });
-    const mySolvedKeys = new Set(myCache?.solvedKeys || []);
+        // Get user's solved keys
+        const myCache = await UserSolvedCache.findOne({ myHandle: handle });
+        const mySolvedKeys = new Set(myCache?.solvedKeys || []);
 
-    // Get verified-solved problems from progress states
-    const completedStates = await ProgressState.find({ myHandle: handle, state: "solved" });
-    const completedProblemKeys = new Set(
-      completedStates.map(s => {
-        // key format: "day-contestId-index" e.g. "1-2057-C"
-        const idx = s.key.indexOf("-", s.key.indexOf("-") + 1);
-        return s.key.slice(s.key.indexOf("-") + 1); // everything after first "-"
-      })
-    );
+        // Get verified-solved problems from progress states
+        const completedStates = await ProgressState.find({ myHandle: handle, state: "solved" });
+        const completedProblemKeys = new Set(
+            completedStates.map(s => {
+                // key format: "day-contestId-index" e.g. "1-2057-C"
+                const idx = s.key.indexOf("-", s.key.indexOf("-") + 1);
+                return s.key.slice(s.key.indexOf("-") + 1); // everything after first "-"
+            })
+        );
 
-    const allBacklog = await Backlog.find({ myHandle: handle })
-      .sort({ nearMyRating: -1, friendSolveCount: -1 });
+        const allBacklog = await Backlog.find({ myHandle: handle })
+            .sort({ nearMyRating: -1, friendSolveCount: -1 });
 
-    const backlog = allBacklog
-      .filter(p => {
-        const key = `${p.contestId}-${p.index}`;
-        if (mySolvedKeys.has(key)) return false;
-        if (completedProblemKeys.has(key)) return false;
-        const hasCurrentFriendSolved    = p.solvedBy?.some(f => friendHandles.includes(f));
-        const hasCurrentFriendAttempted = p.attemptedBy?.some(f => friendHandles.includes(f));
-        return hasCurrentFriendSolved || hasCurrentFriendAttempted;
-      })
-      .map(p => ({
-        ...p.toObject(),
-        solvedBy:         p.solvedBy?.filter(f => friendHandles.includes(f)),
-        attemptedBy:      p.attemptedBy?.filter(f => friendHandles.includes(f)),
-        friendSolveCount: p.solvedBy?.filter(f => friendHandles.includes(f)).length,
-      }));
+        const backlog = allBacklog
+            .filter(p => {
+                const key = `${p.contestId}-${p.index}`;
+                if (mySolvedKeys.has(key)) return false;
+                if (completedProblemKeys.has(key)) return false;
+                const hasCurrentFriendSolved = p.solvedBy?.some(f => friendHandles.includes(f));
+                const hasCurrentFriendAttempted = p.attemptedBy?.some(f => friendHandles.includes(f));
+                return hasCurrentFriendSolved || hasCurrentFriendAttempted;
+            })
+            .map(p => ({
+                ...p.toObject(),
+                solvedBy: p.solvedBy?.filter(f => friendHandles.includes(f)),
+                attemptedBy: p.attemptedBy?.filter(f => friendHandles.includes(f)),
+                friendSolveCount: p.solvedBy?.filter(f => friendHandles.includes(f)).length,
+            }));
 
-    res.json({
-      success:      true,
-      total:        backlog.length,
-      nearMyRating: backlog.filter(p => p.nearMyRating).length,
-      practiceRating,
-      backlog,
-      lastSynced:   allBacklog[0]?.updatedAt || null,
-    });
-  } catch (err) {
-    console.error("[Backlog] Error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+        res.json({
+            success: true,
+            total: backlog.length,
+            nearMyRating: backlog.filter(p => p.nearMyRating).length,
+            practiceRating,
+            backlog,
+            lastSynced: allBacklog[0]?.updatedAt || null,
+        });
+    } catch (err) {
+        console.error("[Backlog] Error:", err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 
@@ -741,7 +754,7 @@ app.post("/api/analyze", requireAuth, async (req, res) => {
         console.log(`[Analyze] Sending ${unsolvedQuestions.length} unsolved problems to Groq...`);
 
         console.log(`[Analyze] Sending data to Groq...`);
-        
+
 
         const groqPrompt = `You are a competitive programming coach.
 
@@ -1200,7 +1213,7 @@ app.get("/api/progress/load", requireAuth, async (req, res) => {
     try {
         const states = await ProgressState.find({ myHandle: handle });
         const map = {};
-        for (const s of states) {map[s.key] = {key: s.key, state: s.state, problem: s.problem, day: s.day}};
+        for (const s of states) { map[s.key] = { key: s.key, state: s.state, problem: s.problem, day: s.day } };
         res.json({ success: true, states: map });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1225,13 +1238,13 @@ app.post("/api/uncomplete", requireAuth, async (req, res) => {
 
 // GET /api/queue/added?handle=X — returns all problem keys in priority queue
 app.get("/api/queue/added", requireAuth, async (req, res) => {
-  const { handle } = req.query;
-  if (!handle) return res.status(400).json({ error: "handle required." });
-  try {
-    const queue = await PriorityQueue.find({ myHandle: handle });
-    const keys = queue.map(p => `${p.contestId}-${p.index}`);
-    res.json({ success: true, keys });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const { handle } = req.query;
+    if (!handle) return res.status(400).json({ error: "handle required." });
+    try {
+        const queue = await PriorityQueue.find({ myHandle: handle });
+        const keys = queue.map(p => `${p.contestId}-${p.index}`);
+        res.json({ success: true, keys });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 

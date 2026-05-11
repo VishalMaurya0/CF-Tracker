@@ -17,6 +17,16 @@ export default function App() {
   // ── Stable axios instance, password mutated in place ─────────────────────
   const passwordRef = useRef(sessionStorage.getItem("cf_pw") || "");
 
+  const jwt = require("jsonwebtoken");
+
+  const generateToken = (user) => {
+    return jwt.sign(
+      { handle: user.handle },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+  };
+
   const api = useMemo(() => axios.create({
     headers: passwordRef.current ? { "x-password": passwordRef.current } : {},
   }), []);
@@ -105,10 +115,10 @@ export default function App() {
   const handleSetUser = (u) => {
     localStorage.setItem("cf_handle", u.handle);
     setUser({
-        ...u,
-        ratingRange: u.ratingRange ?? 200,
+      ...u,
+      ratingRange: u.ratingRange ?? 200,
     });
-};
+  };
 
   const handleLogout = () => {
     localStorage.removeItem("cf_handle");
