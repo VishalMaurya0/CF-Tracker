@@ -47,6 +47,24 @@ const backlogSchema = new mongoose.Schema({
 });
 const Backlog = mongoose.model("Backlog", backlogSchema);
 
+const friendProblemsSchema = new mongoose.Schema({
+    handle: { type: String, required: true, unique: true },
+    solved: [{ contestId: Number, index: String, name: String, rating: Number, tags: [String], url: String }],
+    attempted: [{ contestId: Number, index: String, name: String, rating: Number, tags: [String], url: String }],
+    lastSubmissionTime: { type: Number, default: 0 },
+    updatedAt: { type: Date, default: Date.now },
+});
+const FriendProblems = mongoose.model("FriendProblems", friendProblemsSchema);
+
+// Cache of user's own solved problems
+const userSolvedCacheSchema = new mongoose.Schema({
+    myHandle: { type: String, required: true, unique: true },
+    solvedKeys: [String], // "contestId-index"
+    lastSubmissionTime: { type: Number, default: 0 }, // unix timestamp
+    updatedAt: { type: Date, default: Date.now },
+});
+const UserSolvedCache = mongoose.model("UserSolvedCache", userSolvedCacheSchema);
+
 // Priority queue — problems Groq recommended after analyzing weak topics
 const priorityQueueSchema = new mongoose.Schema({
     myHandle: String,
@@ -107,6 +125,178 @@ const getSolvedKeys = async (handle) => {
     return { solved, attempted };
 };
 
+const syncFriend = async (friendHandle) => {
+    const existing = await FriendProblems.findOne({ handle: friendHandle });
+
+    let submissions;
+
+    if (!existing) {
+        console.log(`[Sync] First time fetching all submissions for ${friendHandle}`);
+        submissions = await cfFetch(
+            `https://codeforces.com/api/user.status?handle=${friendHandle}&count=10000`
+        );
+    } else {
+        const lastFetch = Math.floor(new Date(existing.updatedAt).getTime() / 1000);
+        console.log(`[Sync] Fetching new submissions for ${friendHandle} since ${existing.updatedAt}`);
+        submissions = await cfFetch(
+            `https://codeforces.com/api/user.status?handle=${friendHandle}&count=10000`
+        );
+        submissions = submissions.filter(s => s.creationTimeSeconds > lastFetch);
+        console.log(`[Sync] ${submissions.length} new submissions found for ${friendHandle}`);
+    }
+
+    if (submissions.length === 0) {
+        console.log(`[Sync] No new submissions for ${friendHandle}, skipping.`);
+        return;
+    }
+
+    const existingSolvedKeys = new Set(
+        (existing?.solved || []).map(p => `${p.contestId}-${p.index}`)
+    );
+    const existingAttemptedKeys = new Set(
+        (existing?.attempted || []).map(p => `${p.contestId}-${p.index}`)
+    );
+
+    const newSolved = [];
+    const newAttempted = [];
+    const seenInThisBatch = new Set();
+
+    for (const sub of submissions) {
+        if (!sub.problem.contestId) continue;
+        const key = `${sub.problem.contestId}-${sub.problem.index}`;
+        if (seenInThisBatch.has(key)) continue;
+        seenInThisBatch.add(key);
+
+        const problem = {
+            contestId: sub.problem.contestId,
+            index: sub.problem.index,
+            name: sub.problem.name,
+            rating: sub.problem.rating || null,
+            tags: sub.problem.tags || [],
+            url: `https://codeforces.com/problemset/problem/${sub.problem.contestId}/${sub.problem.index}`,
+        };
+
+        if (sub.verdict === "OK" && !existingSolvedKeys.has(key)) {
+            newSolved.push(problem);
+            existingAttemptedKeys.delete(key);
+        } else if (sub.verdict !== "OK" && !existingSolvedKeys.has(key) && !existingAttemptedKeys.has(key)) {
+            newAttempted.push(problem);
+        }
+    }
+
+    if (!existing) {
+        await FriendProblems.create({
+            handle: friendHandle,
+            solved: newSolved,
+            attempted: newAttempted,
+            updatedAt: new Date(),
+        });
+    } else {
+        // Push new problems in
+        await FriendProblems.findOneAndUpdate(
+            { handle: friendHandle },
+            {
+                $push: { solved: { $each: newSolved }, attempted: { $each: newAttempted } },
+                updatedAt: new Date(),
+            }
+        );
+        // Remove from attempted if now solved — match both contestId AND index
+        for (const p of newSolved) {
+            await FriendProblems.findOneAndUpdate(
+                { handle: friendHandle },
+                { $pull: { attempted: { contestId: p.contestId, index: p.index } } }
+            );
+        }
+    }
+
+    console.log(`[Sync] Saved ${newSolved.length} new solved, ${newAttempted.length} new attempted for ${friendHandle}`);
+};
+
+// ─── Helper: rebuild backlog from DB cache ────────────────────────────────────
+const rebuildBacklog = async (myHandle) => {
+    const settings = await UserSettings.findOne({ myHandle });
+    if (!settings) throw new Error("User not found.");
+
+    const { friendHandles, practiceRating } = settings;
+    const RATING_RANGE = 200;
+
+    // Get your solved keys from cache
+    const myCache = await UserSolvedCache.findOne({ myHandle });
+    const mySolvedKeys = new Set(myCache?.solvedKeys || []);
+
+    // Build problem map from cached FriendProblems
+    const problemMap = {};
+
+    for (const friend of friendHandles) {
+        const cached = await FriendProblems.findOne({ handle: friend });
+        if (!cached) continue;
+
+        for (const p of cached.solved) {
+            const key = `${p.contestId}-${p.index}`;
+            if (mySolvedKeys.has(key)) continue;
+            if (!problemMap[key]) problemMap[key] = { problem: p, solvedBy: [], attemptedBy: [] };
+            if (!problemMap[key].solvedBy.includes(friend)) problemMap[key].solvedBy.push(friend);
+        }
+
+        for (const p of cached.attempted) {
+            const key = `${p.contestId}-${p.index}`;
+            if (mySolvedKeys.has(key)) continue;
+            if (!problemMap[key]) problemMap[key] = { problem: p, solvedBy: [], attemptedBy: [] };
+            if (!problemMap[key].solvedBy.includes(friend) && !problemMap[key].attemptedBy.includes(friend)) {
+                problemMap[key].attemptedBy.push(friend);
+            }
+        }
+    }
+
+    // Upsert each problem into Backlog collection
+    const backlog = [];
+    for (const [key, data] of Object.entries(problemMap)) {
+        const p = data.problem;
+        const nearMyRating = p.rating
+            ? Math.abs(p.rating - practiceRating) <= RATING_RANGE
+            : false;
+
+        const doc = {
+            key,
+            contestId: p.contestId,
+            index: p.index,
+            name: p.name,
+            rating: p.rating,
+            tags: p.tags,
+            solvedBy: data.solvedBy,
+            attemptedBy: data.attemptedBy,
+            friendSolveCount: data.solvedBy.length,
+            nearMyRating,
+            url: p.url,
+            myHandle,
+            updatedAt: new Date(),
+        };
+
+        await Backlog.findOneAndUpdate(
+            { myHandle, contestId: p.contestId, index: p.index },
+            doc,
+            { upsert: true, new: true }
+        );
+        backlog.push(doc);
+    }
+
+    // Remove problems from backlog that user has now solved
+    await Backlog.deleteMany({ myHandle, key: { $in: [...mySolvedKeys] } });
+
+    backlog.sort((a, b) => {
+        if (a.nearMyRating && !b.nearMyRating) return -1;
+        if (!a.nearMyRating && b.nearMyRating) return 1;
+        return b.friendSolveCount - a.friendSolveCount;
+    });
+
+    return {
+        backlog,
+        total: backlog.length,
+        nearMyRating: backlog.filter(p => p.nearMyRating).length,
+        practiceRating,
+    };
+};
+
 // ─── ROUTE 1: POST /api/setup ─────────────────────────────────────────────────
 // Save your CF handle, friends, and practice rating
 app.post("/api/setup", async (req, res) => {
@@ -117,29 +307,39 @@ app.post("/api/setup", async (req, res) => {
         return res.status(400).json({ error: "friendHandles must be an array." });
     }
 
+
     try {
         // Validate all handles exist on CF
         let currentRating;
         console.log(`[Setup] Validating handles...`);
-        for (const handle of [myHandle, ...friendHandles]) {
-            try {
-                const result = await cfFetch(`https://codeforces.com/api/user.info?handles=${handle}`);
-                if (handle === myHandle && result[0].rating) {
-                    currentRating = result[0].rating;
-                    console.log(`[Setup] ${myHandle} current rating: ${currentRating}`);
-                }
-            } catch {
-                return res.status(400).json({ error: `CF handle not found: ${handle}` });
+        // Validate all handles at once using CF batch endpoint
+        try {
+            const allHandles = [myHandle, ...friendHandles].filter(Boolean);
+            const result = await cfFetch(
+                `https://codeforces.com/api/user.info?handles=${allHandles.join(";")}`
+            );
+            // Get current rating for myHandle
+            const myInfo = result.find(u => u.handle.toLowerCase() === myHandle.toLowerCase());
+            if (myInfo?.rating) {
+                currentRating = myInfo.rating;
+                console.log(`[Setup] ${myHandle} current rating: ${currentRating}`);
             }
+        } catch (e) {
+            return res.status(400).json({ error: `One or more CF handles not found. Check spelling.` });
         }
 
 
-        // Save or update settings
+        // Get existing friends if new list is empty
+        const existing = await UserSettings.findOne({ myHandle });
+        const finalFriends = (friendHandles && friendHandles.length > 0)
+            ? friendHandles
+            : (existing?.friendHandles || []);
+
         await UserSettings.findOneAndUpdate(
             { myHandle },
             {
                 myHandle,
-                friendHandles,
+                friendHandles: finalFriends,
                 practiceRating: practiceRating || currentRating,
                 currentRating,
                 updatedAt: new Date(),
@@ -147,9 +347,169 @@ app.post("/api/setup", async (req, res) => {
             { upsert: true, new: true }
         );
 
+
+        // If friendHandles changed, rebuild backlog to reflect current friends only
+        if (finalFriends.length !== (existing?.friendHandles?.length || 0) ||
+            finalFriends.some((f, i) => f !== (existing?.friendHandles || [])[i])) {
+            try {
+                await rebuildBacklog(myHandle);
+                console.log(`[Setup] Backlog rebuilt after friends change.`);
+            } catch (e) {
+                console.log(`[Setup] Backlog rebuild skipped:`, e.message);
+            }
+        }
+
         console.log(`[Setup] Saved settings for ${myHandle}`);
-        res.json({ success: true, message: `Setup complete for ${myHandle}` });
+        res.json({
+            success: true,
+            message: `Setup complete for ${myHandle}`,
+            currentRating,
+            practiceRating: practiceRating || currentRating,
+            friendHandles: finalFriends,
+        });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+app.post("/api/friends/sync", async (req, res) => {
+    const { handle } = req.body;
+    if (!handle) return res.status(400).json({ error: "handle required." });
+
+    try {
+        const settings = await UserSettings.findOne({ myHandle: handle });
+        if (!settings) return res.status(404).json({ error: "Run setup first." });
+
+        const { friendHandles } = settings;
+        const results = [];
+
+        // ── Step 1: Update YOUR solved cache ─────────────────────────────────
+        console.log(`[Sync] Updating solved cache for ${handle}...`);
+        const myCache = await UserSolvedCache.findOne({ myHandle: handle });
+        const myLastTime = myCache?.lastSubmissionTime || 0;
+
+        // Fetch recent submissions — stop when we hit ones older than lastSubmissionTime
+        const mySubmissions = await cfFetch(
+            `https://codeforces.com/api/user.status?handle=${handle}&count=500`
+        );
+
+        const newSolvedKeys = new Set(myCache?.solvedKeys || []);
+        let myNewestTime = myLastTime;
+        let myNewCount = 0;
+
+        for (const sub of mySubmissions) {
+            if (sub.creationTimeSeconds <= myLastTime) break; // stop at known submissions
+            if (sub.creationTimeSeconds > myNewestTime) myNewestTime = sub.creationTimeSeconds;
+            if (sub.verdict === "OK" && sub.problem.contestId) {
+                const key = `${sub.problem.contestId}-${sub.problem.index}`;
+                if (!newSolvedKeys.has(key)) {
+                    newSolvedKeys.add(key);
+                    myNewCount++;
+                }
+            }
+        }
+
+        await UserSolvedCache.findOneAndUpdate(
+            { myHandle: handle },
+            {
+                myHandle: handle,
+                solvedKeys: [...newSolvedKeys],
+                lastSubmissionTime: myNewestTime,
+                updatedAt: new Date(),
+            },
+            { upsert: true, new: true }
+        );
+        console.log(`[Sync] Your cache: ${myNewCount} new solved problems. Total: ${newSolvedKeys.size}`);
+
+        // ── Step 2: Update each friend incrementally ──────────────────────────
+        for (const friend of friendHandles) {
+            const cached = await FriendProblems.findOne({ handle: friend });
+            const lastTime = cached?.lastSubmissionTime || 0;
+
+            console.log(`[Sync] Fetching new submissions for ${friend} since ${new Date(lastTime * 1000).toLocaleDateString()}...`);
+
+            // Fetch up to 500 recent submissions — enough to catch up
+            const submissions = await cfFetch(
+                `https://codeforces.com/api/user.status?handle=${friend}&count=500`
+            );
+
+            const existingSolvedKeys = new Set((cached?.solved || []).map(p => `${p.contestId}-${p.index}`));
+            const existingAttemptedKeys = new Set((cached?.attempted || []).map(p => `${p.contestId}-${p.index}`));
+            const newSolved = [...(cached?.solved || [])];
+            const newAttempted = [...(cached?.attempted || [])];
+
+            let newestTime = lastTime;
+            let addedSolved = 0, addedAttempted = 0;
+
+            for (const sub of submissions) {
+                if (sub.creationTimeSeconds <= lastTime) break; // only process new ones
+                if (!sub.problem.contestId) continue;
+
+                const key = `${sub.problem.contestId}-${sub.problem.index}`;
+                if (sub.creationTimeSeconds > newestTime) newestTime = sub.creationTimeSeconds;
+
+                const problem = {
+                    contestId: sub.problem.contestId,
+                    index: sub.problem.index,
+                    name: sub.problem.name,
+                    rating: sub.problem.rating || null,
+                    tags: sub.problem.tags || [],
+                    url: `https://codeforces.com/problemset/problem/${sub.problem.contestId}/${sub.problem.index}`,
+                };
+
+                if (sub.verdict === "OK") {
+                    if (!existingSolvedKeys.has(key)) {
+                        existingSolvedKeys.add(key);
+                        newSolved.push(problem);
+                        addedSolved++;
+                        // Remove from attempted if they eventually solved it
+                        const idx = newAttempted.findIndex(p => `${p.contestId}-${p.index}` === key);
+                        if (idx !== -1) newAttempted.splice(idx, 1);
+                    }
+                } else {
+                    if (!existingSolvedKeys.has(key) && !existingAttemptedKeys.has(key)) {
+                        existingAttemptedKeys.add(key);
+                        newAttempted.push(problem);
+                        addedAttempted++;
+                    }
+                }
+            }
+
+            await FriendProblems.findOneAndUpdate(
+                { handle: friend },
+                {
+                    handle: friend,
+                    solved: newSolved,
+                    attempted: newAttempted,
+                    lastSubmissionTime: newestTime,
+                    updatedAt: new Date(),
+                },
+                { upsert: true, new: true }
+            );
+
+            console.log(`[Sync] ${friend}: +${addedSolved} solved, +${addedAttempted} attempted`);
+            results.push({
+                friend,
+                addedSolved,
+                addedAttempted,
+                totalSolved: newSolved.length,
+                totalAttempted: newAttempted.length,
+            });
+        }
+
+        // ── Step 3: Rebuild backlog from updated cache ────────────────────────
+        console.log(`[Sync] Rebuilding backlog...`);
+        const backlogData = await rebuildBacklog(handle);
+
+        res.json({
+            success: true,
+            myNewSolved: myNewCount,
+            friends: results,
+            ...backlogData,
+        });
+    } catch (err) {
+        console.error("[Sync] Error:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -158,116 +518,45 @@ app.post("/api/setup", async (req, res) => {
 // Fetch all problems friends solved/attempted that you haven't solved
 app.get("/api/backlog", async (req, res) => {
     const { handle } = req.query;
-    if (!handle) return res.status(400).json({ error: "handle query param required." });
+    if (!handle) return res.status(400).json({ error: "handle required." });
 
     try {
         const settings = await UserSettings.findOne({ myHandle: handle });
         if (!settings) return res.status(404).json({ error: "Run /api/setup first." });
 
-        const { friendHandles, practiceRating } = settings;
-        const RATING_RANGE = 200;
+        const { practiceRating, friendHandles } = settings;
 
-        console.log(`[Backlog] Fetching submissions for ${handle} and ${friendHandles.length} friends...`);
+        // Read from Backlog collection but filter to only current friends
+        const allBacklog = await Backlog.find({ myHandle: handle })
+            .sort({ nearMyRating: -1, friendSolveCount: -1 });
 
-        // Get your solved problems
-        const { solved: mySolved } = await getSolvedKeys(handle);
-        console.log(`[Backlog] You solved ${mySolved.size} problems.`);
-
-        // Get each friend's solved + attempted problems
-        const problemMap = {}; // key → { problem, solvedBy[], attemptedBy[] }
-
-        for (const friend of friendHandles) {
-            console.log(`[Backlog] Fetching ${friend}'s submissions...`);
-            const { solved: friendSolved, attempted: friendAttempted } = await getSolvedKeys(friend);
-
-            // Add solved problems
-            for (const key of friendSolved) {
-                if (!mySolved.has(key)) {
-                    if (!problemMap[key]) problemMap[key] = { solvedBy: [], attemptedBy: [] };
-                    if (!problemMap[key].solvedBy.includes(friend)) {
-                        problemMap[key].solvedBy.push(friend);
-                    }
-                }
-            }
-
-            // Add attempted-but-not-solved problems
-            for (const key of friendAttempted) {
-                if (!mySolved.has(key) && !friendSolved.has(key)) {
-                    if (!problemMap[key]) problemMap[key] = { solvedBy: [], attemptedBy: [] };
-                    if (!problemMap[key].attemptedBy.includes(friend)) {
-                        problemMap[key].attemptedBy.push(friend);
-                    }
-                }
-            }
-        }
-
-        console.log(`[Backlog] Found ${Object.keys(problemMap).length} unique unsolved problems.`);
-
-        // Fetch problem details from CF problemset
-        const allProblems = await cfFetch("https://codeforces.com/api/problemset.problems");
-        const problemDetails = {}; // "contestId-index" → problem object
-        for (const p of allProblems.problems) {
-            if (p.contestId && p.index) {
-                problemDetails[`${p.contestId}-${p.index}`] = p;
-            }
-        }
-
-        // Build backlog array
-        const backlog = [];
-        for (const [key, data] of Object.entries(problemMap)) {
-            const detail = problemDetails[key];
-            if (!detail) continue; // skip if problem details not found
-
-            const [contestId, index] = key.split("-");
-            const rating = detail.rating || null;
-            const nearMyRating = rating
-                ? Math.abs(rating - practiceRating) <= RATING_RANGE
-                : false;
-
-            backlog.push({
-                key,
-                contestId: Number(contestId),
-                index,
-                name: detail.name,
-                rating,
-                tags: detail.tags || [],
-                solvedBy: data.solvedBy,
-                attemptedBy: data.attemptedBy,
-                friendSolveCount: data.solvedBy.length,
-                nearMyRating,
-                url: `https://codeforces.com/problemset/problem/${contestId}/${index}`,
-            });
-        }
-
-        // Sort: nearMyRating first, then by friendSolveCount descending
-        backlog.sort((a, b) => {
-            if (a.nearMyRating && !b.nearMyRating) return -1;
-            if (!a.nearMyRating && b.nearMyRating) return 1;
-            return b.friendSolveCount - a.friendSolveCount;
-        });
-
-        // Save to MongoDB (upsert each problem)
-        console.log(`[Backlog] Saving ${backlog.length} problems to MongoDB...`);
-        for (const p of backlog) {
-            await Backlog.findOneAndUpdate(
-                { myHandle: handle, contestId: p.contestId, index: p.index },
-                { ...p, myHandle: handle, updatedAt: new Date() },
-                { upsert: true, new: true }
-            );
-        }
+        // Keep only problems where at least one current friend is in solvedBy or attemptedBy
+        const backlog = allBacklog.filter(p => {
+            const hasCurrentFriendSolved = p.solvedBy?.some(f => friendHandles.includes(f));
+            const hasCurrentFriendAttempted = p.attemptedBy?.some(f => friendHandles.includes(f));
+            return hasCurrentFriendSolved || hasCurrentFriendAttempted;
+        }).map(p => ({
+            ...p.toObject(),
+            // Also strip removed friends from the display arrays
+            solvedBy: p.solvedBy?.filter(f => friendHandles.includes(f)),
+            attemptedBy: p.attemptedBy?.filter(f => friendHandles.includes(f)),
+            friendSolveCount: p.solvedBy?.filter(f => friendHandles.includes(f)).length,
+        }));
 
         res.json({
             success: true,
             total: backlog.length,
-            nearMyRating: backlog.filter((p) => p.nearMyRating).length,
+            nearMyRating: backlog.filter(p => p.nearMyRating).length,
             practiceRating,
             backlog,
+            lastSynced: allBacklog[0]?.updatedAt || null,
         });
     } catch (err) {
-        console.error("[Backlog] Error:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
+
+
 
 // ─── ROUTE 3: POST /api/analyze ───────────────────────────────────────────────
 // Fetch last X days of your submissions, analyze weak topics with Groq,
@@ -487,12 +776,15 @@ Respond ONLY with valid JSON, no other text, no markdown:
         const savedCount = await PriorityQueue.countDocuments({ myHandle: handle });
         console.log(`[Analyze] Saved ${savedCount} real CF problems to priority queue.`);
 
+        // console.log(days);
+
         res.json({
             success: true,
             submissionsAnalyzed: recent.length,
             weakTopics: analysis.weakTopics,
             summary: analysis.summary,
             priorityQueueSize: savedCount,
+            lastAnalysisDays: days,
             topProblems: allCandidates.slice(0, 10),
         });
 
@@ -795,6 +1087,11 @@ app.post("/api/uncomplete", async (req, res) => {
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+
+
+
+
 
 // ─── Start server ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {

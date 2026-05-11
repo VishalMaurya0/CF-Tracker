@@ -6,7 +6,7 @@ import "./index.css";
 const API = "http://localhost:3001";
 
 export default function App() {
-  const [user, setUser]       = useState(null);
+  const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
   // On mount — check localStorage for saved handle and reload from DB
@@ -25,7 +25,7 @@ export default function App() {
           });
         }
       })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => setLoading(false));
   }, []);
 
@@ -34,12 +34,17 @@ export default function App() {
     setUser(u);
   };
 
+  const handleLogout = () => {
+    localStorage.removeItem("cf_handle");
+    setUser(null);
+  };
+
   if (loading) return (
-    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center" }}>
-      <span className="spinner" style={{ width:24, height:24, borderWidth:3 }}/>
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <span className="spinner" style={{ width: 24, height: 24, borderWidth: 3 }} />
     </div>
   );
 
   if (!user) return <SetupScreen API={API} onDone={handleSetUser} />;
-  return <MainApp API={API} user={user} setUser={handleSetUser} />;
+  return <MainApp API={API} user={user} setUser={handleSetUser} onLogout={handleLogout} />;
 }

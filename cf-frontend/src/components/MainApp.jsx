@@ -5,7 +5,7 @@ import AnalyzePanel from "./AnalyzePanel";
 import PlanPanel from "./PlanPanel";
 import BacklogPanel from "./BacklogPanel";
 
-export default function MainApp({ API, user, setUser }) {
+export default function MainApp({ API, user, setUser, onLogout }) {
   const [section, setSection]                   = useState("analyze");
   const [analysis, setAnalysis]                 = useState(null);
   const [plan, setPlan]                         = useState(null);
@@ -59,6 +59,9 @@ export default function MainApp({ API, user, setUser }) {
     loadSession();
   }, [user.handle]);
 
+
+
+
   // Save analysis to localStorage whenever it changes
   const handleSetAnalysis = (data) => {
     setAnalysis(data);
@@ -72,12 +75,18 @@ export default function MainApp({ API, user, setUser }) {
     </div>
   );
 
+
+
+
+
+
   return (
     <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column" }}>
       <TopBar
         user={user} setUser={setUser} API={API}
         section={section} setSection={setSection}
         analysisReady={!!analysis}
+        onLogout={onLogout}   
       />
       <div style={{ flex:1, padding:"24px", maxWidth:1100, margin:"0 auto", width:"100%", animation:"fadeIn .3s ease" }}>
         {section==="analyze" && (
