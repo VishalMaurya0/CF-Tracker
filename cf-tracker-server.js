@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import Groq from "groq-sdk";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 dotenv.config();
 
@@ -124,11 +125,10 @@ const requireAuth = async (req, res, next) => {
     next();
 };
 
-const jwt = require("jsonwebtoken");
 
 const generateToken = (user) => {
     return jwt.sign(
-        { handle: user.handle },
+        { handle: user.myHandle },
         process.env.JWT_SECRET,
         { expiresIn: "7d" }
     );
