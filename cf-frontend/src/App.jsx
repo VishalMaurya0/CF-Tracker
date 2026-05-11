@@ -17,7 +17,6 @@ export default function App() {
   // ── Stable axios instance, password mutated in place ─────────────────────
   const passwordRef = useRef(sessionStorage.getItem("cf_pw") || "");
 
-  const jwt = require("jsonwebtoken");
 
   const generateToken = (user) => {
     return jwt.sign(
