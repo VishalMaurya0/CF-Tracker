@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import Groq from "groq-sdk";
+import bcrypt from "bcryptjs";
 
 dotenv.config();
 
@@ -27,9 +28,12 @@ const userSettingsSchema = new mongoose.Schema({
     practiceRating: { type: Number, default: 1200 },
     currentRating: { type: Number, default: 1200 },
     ratingRange: { type: Number, default: 200 },
+    passwordHash: { type: String, default: null },
     updatedAt: { type: Date, default: Date.now },
 });
 const UserSettings = mongoose.model("UserSettings", userSettingsSchema);
+
+
 
 // Backlog — problems friends solved/attempted that you haven't solved
 const backlogSchema = new mongoose.Schema({
@@ -101,6 +105,80 @@ const planSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
 });
 const Plan = mongoose.model("CFPlan", planSchema);
+
+// ─── Auth middleware ──────────────────────────────────────────────────────────
+const requireAuth = async (req, res, next) => {
+    const handle = req.body?.handle || req.body?.myHandle || req.query?.handle;
+    const password = req.headers["x-password"];
+
+    if (!handle) return res.status(400).json({ error: "handle required." });
+
+    const settings = await UserSettings.findOne({ myHandle: handle });
+    if (!settings) return next();
+    if (!settings.passwordHash) return next();
+    if (!password) return res.status(401).json({ error: "Password required.", needsPassword: true });
+
+    const match = await bcrypt.compare(password, settings.passwordHash);
+    if (!match) return res.status(401).json({ error: "Incorrect password.", needsPassword: true });
+
+    next();
+};
+
+// ─── ROUTE: POST /api/auth/set-password ──────────────────────────────────────
+        // Set password for first time, or change it (requires old password if one exists)
+        app.post("/api/auth/set-password", async (req, res) => {
+            const { handle, oldPassword, newPassword } = req.body;
+            if (!handle || !newPassword) {
+                return res.status(400).json({ error: "handle and newPassword required." });
+            }
+            if (newPassword.length < 4) {
+                return res.status(400).json({ error: "Password must be at least 4 characters." });
+            }
+            try {
+                const settings = await UserSettings.findOne({ myHandle: handle });
+                if (!settings) return res.status(404).json({ error: "Run /api/setup first." });
+        
+                // If password already set, verify old password
+                if (settings.passwordHash) {
+                    if (!oldPassword) return res.status(401).json({ error: "Current password required to change password." });
+                    const match = await bcrypt.compare(oldPassword, settings.passwordHash);
+                    if (!match) return res.status(401).json({ error: "Current password incorrect." });
+                }
+        
+                const hash = await bcrypt.hash(newPassword, 10);
+                await UserSettings.findOneAndUpdate({ myHandle: handle }, { passwordHash: hash });
+        
+                res.json({ success: true, message: "Password updated." });
+            } catch (err) {
+                res.status(500).json({ error: err.message });
+            }
+        });
+        
+        // ─── ROUTE: POST /api/auth/login ─────────────────────────────────────────────
+        // Verify handle + password, returns whether account has a password set
+        app.post("/api/auth/login", async (req, res) => {
+            const { handle, password } = req.body;
+            if (!handle) return res.status(400).json({ error: "handle required." });
+            try {
+                const settings = await UserSettings.findOne({ myHandle: handle });
+                if (!settings) return res.status(404).json({ error: "Handle not found. Run setup first." });
+        
+                if (!settings.passwordHash) {
+                    // No password set — log them straight in, prompt to set one
+                    return res.json({ success: true, noPasswordSet: true });
+                }
+        
+                if (!password) return res.status(401).json({ error: "Password required.", needsPassword: true });
+        
+                const match = await bcrypt.compare(password, settings.passwordHash);
+                if (!match) return res.status(401).json({ error: "Incorrect password." });
+        
+                res.json({ success: true });
+            } catch (err) {
+                res.status(500).json({ error: err.message });
+            }
+        });
+
 
 // ─── Helper: fetch from Codeforces API ───────────────────────────────────────
 const cfFetch = async (url) => {
@@ -300,7 +378,7 @@ const rebuildBacklog = async (myHandle) => {
 
 // ─── ROUTE 1: POST /api/setup ─────────────────────────────────────────────────
 // Save your CF handle, friends, and practice rating
-app.post("/api/setup", async (req, res) => {
+app.post("/api/setup", requireAuth, async (req, res) => {
     const { myHandle, friendHandles, practiceRating, ratingRange } = req.body;
 
     if (!myHandle) return res.status(400).json({ error: "myHandle is required." });
@@ -375,7 +453,7 @@ app.post("/api/setup", async (req, res) => {
 });
 
 
-app.post("/api/friends/sync", async (req, res) => {
+app.post("/api/friends/sync", requireAuth, async (req, res) => {
     const { handle } = req.body;
     if (!handle) return res.status(400).json({ error: "handle required." });
 
@@ -518,7 +596,7 @@ app.post("/api/friends/sync", async (req, res) => {
 
 // ─── ROUTE 2: GET /api/backlog?handle=YOUR_HANDLE ─────────────────────────────
 // Fetch all problems friends solved/attempted that you haven't solved
-app.get("/api/backlog", async (req, res) => {
+app.get("/api/backlog", requireAuth, async (req, res) => {
   const { handle } = req.query;
   if (!handle) return res.status(400).json({ error: "handle required." });
 
@@ -579,7 +657,7 @@ app.get("/api/backlog", async (req, res) => {
 // ─── ROUTE 3: POST /api/analyze ───────────────────────────────────────────────
 // Fetch last X days of your submissions, analyze weak topics with Groq,
 // save recommended problems to priority queue
-app.post("/api/analyze", async (req, res) => {
+app.post("/api/analyze", requireAuth, async (req, res) => {
     const { handle, days } = req.body;
     if (!handle || !days) {
         return res.status(400).json({ error: "handle and days are required." });
@@ -663,6 +741,7 @@ app.post("/api/analyze", async (req, res) => {
         console.log(`[Analyze] Sending ${unsolvedQuestions.length} unsolved problems to Groq...`);
 
         console.log(`[Analyze] Sending data to Groq...`);
+        
 
         const groqPrompt = `You are a competitive programming coach.
 
@@ -841,7 +920,7 @@ Respond ONLY with valid JSON, no other text, no markdown:
 
 // ─── ROUTE 4: POST /api/plan ──────────────────────────────────────────────────
 // Generate a Y-day plan from the priority queue
-app.post("/api/plan", async (req, res) => {
+app.post("/api/plan", requireAuth, async (req, res) => {
     const { handle, days } = req.body;
     if (!handle || !days) {
         return res.status(400).json({ error: "handle and days are required." });
@@ -951,7 +1030,7 @@ app.post("/api/plan", async (req, res) => {
 
 // ─── ROUTE 5a: GET /api/today?handle=X&day=N ─────────────────────────────────
 // Get todos for a specific day (default: day 1)
-app.get("/api/today", async (req, res) => {
+app.get("/api/today", requireAuth, async (req, res) => {
     const { handle, day } = req.query;
     if (!handle) return res.status(400).json({ error: "handle required." });
 
@@ -980,7 +1059,7 @@ app.get("/api/today", async (req, res) => {
 
 // ─── ROUTE 5b: POST /api/complete ─────────────────────────────────────────────
 // Mark a todo as done
-app.post("/api/complete", async (req, res) => {
+app.post("/api/complete", requireAuth, async (req, res) => {
     const { handle, day, contestId, index } = req.body;
     if (!handle || !day || !contestId || !index) {
         return res.status(400).json({ error: "handle, day, contestId, index required." });
@@ -1020,7 +1099,7 @@ app.post("/api/complete", async (req, res) => {
 
 // ─── ROUTE: POST /api/verify ──────────────────────────────────────────────────
 // Check if user actually solved a problem on CF
-app.post("/api/verify", async (req, res) => {
+app.post("/api/verify", requireAuth, async (req, res) => {
     const { handle, contestId, index } = req.body;
     if (!handle || !contestId || !index) {
         return res.status(400).json({ error: "handle, contestId, index required." });
@@ -1044,7 +1123,7 @@ app.post("/api/verify", async (req, res) => {
 
 // ─── ROUTE: POST /api/queue/add ───────────────────────────────────────────────
 // Add a backlog problem to priority queue (persists through reanalyze)
-app.post("/api/queue/add", async (req, res) => {
+app.post("/api/queue/add", requireAuth, async (req, res) => {
     const { handle, contestId, index, name, rating, tags, topic, url } = req.body;
     if (!handle || !contestId || !index) {
         return res.status(400).json({ error: "handle, contestId, index required." });
@@ -1077,7 +1156,7 @@ app.post("/api/queue/add", async (req, res) => {
 
 
 // ─── ROUTE: GET /api/profile?handle=X ────────────────────────────────────────
-app.get("/api/profile", async (req, res) => {
+app.get("/api/profile", requireAuth, async (req, res) => {
     const { handle } = req.query;
     if (!handle) return res.status(400).json({ error: "handle required." });
     try {
@@ -1102,7 +1181,7 @@ const progressStateSchema = new mongoose.Schema({
 });
 const ProgressState = mongoose.model("ProgressState", progressStateSchema);
 
-app.post("/api/progress/save", async (req, res) => {
+app.post("/api/progress/save", requireAuth, async (req, res) => {
     const { handle, key, state, problem, day } = req.body;
     if (!handle || !key || !state || !problem || !day) return res.status(400).json({ error: "handle, key, state, problem, day required." });
     try {
@@ -1115,7 +1194,7 @@ app.post("/api/progress/save", async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get("/api/progress/load", async (req, res) => {
+app.get("/api/progress/load", requireAuth, async (req, res) => {
     const { handle } = req.query;
     if (!handle) return res.status(400).json({ error: "handle required." });
     try {
@@ -1128,7 +1207,7 @@ app.get("/api/progress/load", async (req, res) => {
 
 
 // ─── ROUTE: POST /api/uncomplete ─────────────────────────────────────────────
-app.post("/api/uncomplete", async (req, res) => {
+app.post("/api/uncomplete", requireAuth, async (req, res) => {
     const { handle, day, contestId, index } = req.body;
     if (!handle || !day || !contestId || !index) {
         return res.status(400).json({ error: "handle, day, contestId, index required." });
@@ -1145,7 +1224,7 @@ app.post("/api/uncomplete", async (req, res) => {
 });
 
 // GET /api/queue/added?handle=X — returns all problem keys in priority queue
-app.get("/api/queue/added", async (req, res) => {
+app.get("/api/queue/added", requireAuth, async (req, res) => {
   const { handle } = req.query;
   if (!handle) return res.status(400).json({ error: "handle required." });
   try {
@@ -1154,6 +1233,7 @@ app.get("/api/queue/added", async (req, res) => {
     res.json({ success: true, keys });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 
 
 

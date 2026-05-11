@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
-import axios from "axios";
 
-export default function BacklogPanel({ API, user, onAddedToQueue }) {
+export default function BacklogPanel({ API, api, user, onAddedToQueue }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -20,8 +19,8 @@ export default function BacklogPanel({ API, user, onAddedToQueue }) {
     setLoading(true); setError("");
     try {
       const [backlogRes, queueRes] = await Promise.all([
-        axios.get(`${API}/api/backlog?handle=${user.handle}`),
-        axios.get(`${API}/api/queue/added?handle=${user.handle}`),
+        api.get(`${API}/api/backlog`, { params: { handle: user.handle } }),
+        api.get(`${API}/api/queue/added`, { params: { handle: user.handle } }),
       ]);
       setData(backlogRes.data);
       setQueuedKeys(new Set(queueRes.data.keys || []));
@@ -29,7 +28,6 @@ export default function BacklogPanel({ API, user, onAddedToQueue }) {
     setLoading(false);
   };
 
-  // Fetch button — sync from CF then reload
   const fetchAndSync = async () => {
     if (user.friendHandles?.length === 0) {
       setError("Add friends first from the top bar.");
@@ -37,9 +35,8 @@ export default function BacklogPanel({ API, user, onAddedToQueue }) {
     }
     setSyncing(true); setError(""); setSyncResult(null);
     try {
-      const res = await axios.post(`${API}/api/friends/sync`, { handle: user.handle });
+      const res = await api.post(`${API}/api/friends/sync`, { handle: user.handle });
       setSyncResult(res.data);
-      // Reload backlog from DB after sync
       await loadFromDB();
     } catch (e) { setError(e.response?.data?.error || "Error syncing."); }
     setSyncing(false);
@@ -49,7 +46,7 @@ export default function BacklogPanel({ API, user, onAddedToQueue }) {
     const key = `${p.contestId}-${p.index}`;
     setAdding(prev => ({ ...prev, [key]: true }));
     try {
-      await axios.post(`${API}/api/queue/add`, {
+      await api.post(`${API}/api/queue/add`, {
         handle: user.handle, contestId: p.contestId, index: p.index,
         name: p.name, rating: p.rating, tags: p.tags,
         topic: p.tags?.[0] || "backlog", url: p.url,

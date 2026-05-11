@@ -14,7 +14,7 @@ const API_LOG_STEPS = [
   { msg: "Saving priority queue to MongoDB...", delay: 9000 },
 ];
 
-export default function AnalyzePanel({ API, user, analysis, setAnalysis, onGoToPlan }) {
+export default function AnalyzePanel({ API, api, user, analysis, setAnalysis, onGoToPlan }) {
   const [days, setDays] = useState(30);
   const [lastAnalysisDays, setLastAnalysisDays] = useState(analysis?.lastAnalysisDays || 0);
   const [planDays, setPlanDays] = useState(7);
@@ -23,18 +23,16 @@ export default function AnalyzePanel({ API, user, analysis, setAnalysis, onGoToP
   const [error, setError] = useState("");
   const [log, setLog] = useState([]);
 
+  // 2. runAnalysis
   const runAnalysis = async () => {
     setLoading(true); setError(""); setLog([]);
 
-    // Show log steps with delays
     API_LOG_STEPS.forEach(step => {
-      setTimeout(() => {
-        setLog(prev => [...prev, step.msg]);
-      }, step.delay);
+      setTimeout(() => setLog(prev => [...prev, step.msg]), step.delay);
     });
 
     try {
-      const res = await axios.post(`${API}/api/analyze`, { handle: user.handle, days: Number(days) });
+      const res = await api.post(`${API}/api/analyze`, { handle: user.handle, days: Number(days) });
       setLog(prev => [...prev, `✓ Done — ${res.data.priorityQueueSize} problems queued.`]);
       setTimeout(() => setAnalysis(res.data), 600);
     } catch (e) {
@@ -43,10 +41,11 @@ export default function AnalyzePanel({ API, user, analysis, setAnalysis, onGoToP
     setLoading(false);
   };
 
+  // 3. runPlan
   const runPlan = async () => {
     setPlanning(true); setError("");
     try {
-      await axios.post(`${API}/api/plan`, { handle: user.handle, days: Number(planDays) });
+      await api.post(`${API}/api/plan`, { handle: user.handle, days: Number(planDays) });
       onGoToPlan();
     } catch (e) { setError(e.response?.data?.error || "Error generating plan."); }
     setPlanning(false);

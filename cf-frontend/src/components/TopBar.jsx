@@ -1,22 +1,23 @@
 import { useState } from "react";
-import axios from "axios";
 
-const syncSettings = (API, user, friendHandles, practiceRating, ratingRange) => {
-  axios.post(`${API}/api/setup`, {
+const syncSettings = (api, API, user, friendHandles, practiceRating, ratingRange) => {
+  api.post(`${API}/api/setup`, {
     myHandle: user.handle,
     friendHandles,
     practiceRating,
     ratingRange,
-  }).catch(() => {});
+  })
+    .then(() => console.log("✅ settings synced"))
+    .catch((err) => {
+      console.error("❌ sync failed:", err.response?.data || err.message);
+    });
 };
 
-export default function TopBar({ user, setUser, API, section, setSection, analysisReady, onLogout }) {
+export default function TopBar({ user, setUser, API, api, section, setSection, analysisReady, onLogout }) {
   const [friendInput, setFriendInput] = useState("");
   const [friends, setFriends] = useState(user.friendHandles || []);
   const [showFriends, setShowFriends] = useState(false);
   const [friendErr, setFriendErr] = useState("");
-
-  // Editable rating state
   const [editingRating, setEditingRating] = useState(false);
   const [ratingDraft, setRatingDraft] = useState(user.practiceRating || "");
   const [rangeDraft, setRangeDraft] = useState(user.ratingRange ?? 200);
@@ -39,7 +40,7 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
     setEditingRating(false);
     const updated = { ...user, practiceRating: pr, ratingRange: rng };
     setUser(updated);
-    syncSettings(API, updated, friends, pr, rng);
+    syncSettings(api, API, updated, friends, pr, rng);
   };
 
   const cancelRating = () => {
@@ -58,14 +59,14 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
     setFriends(newFriends);
     setUser({ ...user, friendHandles: newFriends });
     setFriendInput("");
-    syncSettings(API, user, newFriends, user.practiceRating, user.ratingRange ?? 200);
+    syncSettings(api, API, user, newFriends, user.practiceRating, user.ratingRange ?? 200);
   };
 
   const removeFriend = (handleToRemove) => {
     const newFriends = friends.filter(f => f !== handleToRemove);
     setFriends(newFriends);
     setUser({ ...user, friendHandles: newFriends });
-    syncSettings(API, user, newFriends, user.practiceRating, user.ratingRange ?? 200);
+    syncSettings(api, API, user, newFriends, user.practiceRating, user.ratingRange ?? 200);
   };
 
   const TABS = [
@@ -74,9 +75,14 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
     { id: "backlog", label: "Backlog" },
   ];
 
+  // useEffect(() => {
+  //   setFriends(user.friendHandles || []);
+  //   setRatingDraft(user.practiceRating || "");
+  //   setRangeDraft(user.ratingRange ?? 200);
+  // }, [user]);
+
   return (
     <div style={{ borderBottom: "1px solid #141414", padding: "0 24px", height: 52, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, background: "#0a0a0a", zIndex: 100 }}>
-      {/* Left: logo + tabs */}
       <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
         <span style={{ fontWeight: 700, fontSize: 15, color: "#fff" }}>⚡ CF Tracker</span>
         <div style={{ display: "flex", gap: 2 }}>
@@ -89,10 +95,7 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
         </div>
       </div>
 
-      {/* Right */}
       <div style={{ display: "flex", alignItems: "center", gap: 16, position: "relative" }}>
-
-        {/* Ratings row */}
         <div style={{ fontSize: 12, display: "flex", gap: 12, alignItems: "center" }}>
           {user.currentRating ? (
             <span style={{ color: "#555" }}>
@@ -100,48 +103,34 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
             </span>
           ) : null}
 
-          {/* Practice rating — click ✎ to edit */}
           {!editingRating ? (
             <span style={{ color: "#555", display: "flex", alignItems: "center", gap: 5 }}>
               Practice:&nbsp;<span style={{ color: "#6c47ff", fontWeight: 600 }}>{user.practiceRating || "—"}</span>
               <span style={{ color: "#333", fontSize: 10 }}>±{user.ratingRange ?? 200}</span>
-              <button
-                onClick={openRatingEdit}
+              <button onClick={openRatingEdit}
                 style={{ background: "transparent", border: "none", color: "#333", cursor: "pointer", fontSize: 11, padding: "0 2px", lineHeight: 1 }}
                 onMouseOver={e => e.target.style.color = "#6c47ff"}
                 onMouseOut={e => e.target.style.color = "#333"}
-                title="Edit practice rating & range"
-              >✎</button>
+                title="Edit practice rating & range">✎</button>
             </span>
           ) : (
             <div style={{ position: "absolute", top: 46, right: 90, background: "#111", border: "1px solid #2a2a3e", borderRadius: 10, padding: "14px", zIndex: 300, width: 220, boxShadow: "0 8px 32px #000a", animation: "fadeIn .15s ease" }}>
               <div style={{ fontSize: 11, color: "#555", marginBottom: 10, letterSpacing: 1 }}>EDIT RATINGS</div>
-
               <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 4 }}>Practice rating</label>
-              <input
-                type="number"
-                value={ratingDraft}
+              <input type="number" value={ratingDraft}
                 onChange={e => setRatingDraft(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && saveRating()}
-                placeholder="e.g. 1400"
-                autoFocus
-                style={{ width: "100%", padding: "6px 8px", fontSize: 13, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none", boxSizing: "border-box", marginBottom: 10 }}
-              />
-
+                placeholder="e.g. 1400" autoFocus
+                style={{ width: "100%", padding: "6px 8px", fontSize: 13, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none", boxSizing: "border-box", marginBottom: 10 }} />
               <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 4 }}>
                 Rating range&nbsp;<span style={{ color: "#333" }}>(±, default 200)</span>
               </label>
-              <input
-                type="number"
-                value={rangeDraft}
+              <input type="number" value={rangeDraft}
                 onChange={e => setRangeDraft(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && saveRating()}
                 placeholder="200"
-                style={{ width: "100%", padding: "6px 8px", fontSize: 13, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none", boxSizing: "border-box", marginBottom: 12 }}
-              />
-
+                style={{ width: "100%", padding: "6px 8px", fontSize: 13, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none", boxSizing: "border-box", marginBottom: 12 }} />
               {ratingErr && <div style={{ fontSize: 11, color: "#f87171", marginBottom: 8 }}>{ratingErr}</div>}
-
               <div style={{ display: "flex", gap: 6 }}>
                 <button onClick={saveRating}
                   style={{ flex: 1, padding: "6px", fontSize: 12, fontWeight: 600, background: "#6c47ff", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}>
@@ -156,7 +145,6 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
           )}
         </div>
 
-        {/* Handle / friends button */}
         <button onClick={() => { setShowFriends(!showFriends); if (editingRating) cancelRating(); }}
           style={{ padding: "5px 12px", fontSize: 13, background: "#111", border: "1px solid #222", borderRadius: 8, color: "#ccc", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
           @{user.handle}
@@ -168,16 +156,13 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
           )}
         </button>
 
-        <button
-          onClick={onLogout}
+        <button onClick={onLogout}
           style={{ padding: "5px 12px", fontSize: 13, background: "transparent", border: "1px solid #222", borderRadius: 8, color: "#555", cursor: "pointer" }}
           onMouseOver={e => e.target.style.color = "#f87171"}
-          onMouseOut={e => e.target.style.color = "#555"}
-        >
+          onMouseOut={e => e.target.style.color = "#555"}>
           Logout
         </button>
 
-        {/* Friends dropdown */}
         {showFriends && (
           <div style={{ position: "absolute", top: 42, right: 0, width: 270, background: "#111", border: "1px solid #222", borderRadius: 10, padding: "14px", zIndex: 200, animation: "fadeIn .2s ease", boxShadow: "0 8px 32px #000a" }}>
             <div style={{ fontSize: 11, color: "#555", marginBottom: 10, letterSpacing: 1 }}>FRIENDS</div>
@@ -188,23 +173,19 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
                 <div key={f} style={{ fontSize: 13, color: "#888", padding: "5px 0", borderBottom: "1px solid #1a1a1a", display: "flex", alignItems: "center", gap: 6 }}>
                   <span style={{ color: "#444", fontSize: 11 }}>@</span>
                   <span style={{ flex: 1 }}>{f}</span>
-                  <button
-                    onClick={() => removeFriend(f)}
+                  <button onClick={() => removeFriend(f)}
                     style={{ background: "transparent", border: "none", color: "#333", cursor: "pointer", fontSize: 14, padding: "0 4px", lineHeight: 1 }}
                     onMouseOver={e => e.target.style.color = "#f87171"}
-                    onMouseOut={e => e.target.style.color = "#333"}
-                  >×</button>
+                    onMouseOut={e => e.target.style.color = "#333"}>×</button>
                 </div>
               ))}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
-              <input
-                value={friendInput}
+              <input value={friendInput}
                 onChange={e => setFriendInput(e.target.value.toLowerCase())}
                 onKeyDown={e => e.key === "Enter" && addFriend()}
                 placeholder="add cf handle"
-                style={{ flex: 1, padding: "7px 10px", fontSize: 12, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none" }}
-              />
+                style={{ flex: 1, padding: "7px 10px", fontSize: 12, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none" }} />
               <button onClick={addFriend}
                 style={{ padding: "7px 12px", fontSize: 13, background: "#6c47ff", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}>
                 +

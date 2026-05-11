@@ -1,11 +1,10 @@
 import { useState, useEffect } from "react";
-import axios from "axios";
 import TopBar from "./TopBar";
 import AnalyzePanel from "./AnalyzePanel";
 import PlanPanel from "./PlanPanel";
 import BacklogPanel from "./BacklogPanel";
 
-export default function MainApp({ API, user, setUser, onLogout }) {
+export default function MainApp({ API, api, user, setUser, onLogout, onPasswordChange }) {
   const [section, setSection]                   = useState("analyze");
   const [analysis, setAnalysis]                 = useState(null);
   const [plan, setPlan]                         = useState(null);
@@ -13,14 +12,14 @@ export default function MainApp({ API, user, setUser, onLogout }) {
   const [todoState, setTodoState]               = useState({});
   const [loadingSession, setLoadingSession]     = useState(true);
 
-  // Load saved plan + progress on mount
   useEffect(() => {
     const loadSession = async () => {
       try {
-        // Load saved plan from DB
-        const profileRes = await axios.get(`${API}/api/profile?handle=${user.handle}`);
+        // ← api.get, not axios.get
+        const profileRes = await api.get(`${API}/api/profile`, {
+          params: { handle: user.handle }
+        });
         if (profileRes.data.plans && profileRes.data.plans.length > 0) {
-          // Reconstruct plan shape
           const plans = profileRes.data.plans;
           setPlan({
             totalDays: plans.length,
@@ -45,13 +44,14 @@ export default function MainApp({ API, user, setUser, onLogout }) {
           });
         }
 
-        // Load saved progress states
-        const progressRes = await axios.get(`${API}/api/progress/load?handle=${user.handle}`);
+        // ← api.get, not axios.get
+        const progressRes = await api.get(`${API}/api/progress/load`, {
+          params: { handle: user.handle }
+        });
         if (progressRes.data.states) {
           setTodoState(progressRes.data.states);
         }
 
-        // Load saved analysis from localStorage
         const savedAnalysis = localStorage.getItem(`cf_analysis_${user.handle}`);
         if (savedAnalysis) setAnalysis(JSON.parse(savedAnalysis));
 
@@ -61,10 +61,6 @@ export default function MainApp({ API, user, setUser, onLogout }) {
     loadSession();
   }, [user.handle]);
 
-
-
-
-  // Save analysis to localStorage whenever it changes
   const handleSetAnalysis = (data) => {
     setAnalysis(data);
     if (data) localStorage.setItem(`cf_analysis_${user.handle}`, JSON.stringify(data));
@@ -77,30 +73,27 @@ export default function MainApp({ API, user, setUser, onLogout }) {
     </div>
   );
 
-
-
-
-
-
   return (
     <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column" }}>
       <TopBar
-        user={user} setUser={setUser} API={API}
+        user={user} setUser={setUser} API={API} api={api}
         section={section} setSection={setSection}
         analysisReady={!!analysis}
-        onLogout={onLogout}   
+        onLogout={onLogout}
       />
       <div style={{ flex:1, padding:"24px", maxWidth:1100, margin:"0 auto", width:"100%", animation:"fadeIn .3s ease" }}>
         {section==="analyze" && (
           <AnalyzePanel
-            API={API} user={user}
+            API={API} api={api}      
+            user={user}
             analysis={analysis} setAnalysis={handleSetAnalysis}
             onGoToPlan={() => { setPlan(null); setSection("plan"); }}
           />
         )}
         {section==="plan" && (
           <PlanPanel
-            API={API} user={user}
+            API={API} api={api}      
+            user={user}
             plan={plan} setPlan={setPlan}
             todoState={todoState} setTodoState={setTodoState}
             hasBacklogAdditions={hasBacklogAdditions}
@@ -109,7 +102,8 @@ export default function MainApp({ API, user, setUser, onLogout }) {
         )}
         {section==="backlog" && (
           <BacklogPanel
-            API={API} user={user}
+            API={API} api={api}
+            user={user}
             onAddedToQueue={() => setHasBacklogAdditions(true)}
           />
         )}

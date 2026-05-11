@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import axios from "axios";
 
-export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodoState, hasBacklogAdditions, setHasBacklogAdditions }) {
+// 1. Add api to props
+export default function PlanPanel({ API, api, user, plan, setPlan, todoState, setTodoState, hasBacklogAdditions, setHasBacklogAdditions }) {
   const [planDays, setPlanDays] = useState(7);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -9,16 +9,20 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
   const [showCompleted, setShowCompleted] = useState(true);
   const [completedProblems, setCompletedProblems] = useState([]);
 
+  // 2. loadPlan
   const loadPlan = async (days) => {
     setLoading(true); setError("");
+    setCompletedProblems([]);
+    setTodoState({});
     try {
-      const res = await axios.post(`${API}/api/plan`, { handle: user.handle, days: Number(days || planDays) });
+      const res = await api.post(`${API}/api/plan`, { handle: user.handle, days: Number(days || planDays) });
       setPlan(res.data);
       setHasBacklogAdditions(false);
     } catch (e) { setError(e.response?.data?.error || "Error generating plan."); }
     setLoading(false);
   };
 
+  // 3. tickProblem — replace all 4 axios calls
   const tickProblem = async (todo, day) => {
     const key = `${day}-${todo.contestId}-${todo.index}`;
     const current = todoState[key] || "pending";
@@ -26,11 +30,9 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
     if (current === "solved" || current === "wrong") {
       setTodoState(p => { const n = { ...p }; delete n[key]; return n; });
       try {
-        await axios.post(`${API}/api/uncomplete`, {
-          handle: user.handle,
-          day: Number(day),
-          contestId: todo.contestId,
-          index: todo.index,
+        await api.post(`${API}/api/uncomplete`, {
+          handle: user.handle, day: Number(day),
+          contestId: todo.contestId, index: todo.index,
         });
       } catch { }
       return;
@@ -40,17 +42,16 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
     setTodoState(p => ({ ...p, [key]: "checking" }));
 
     try {
-      await axios.post(`${API}/api/complete`, { handle: user.handle, day, contestId: todo.contestId, index: todo.index });
-      const verify = await axios.post(`${API}/api/verify`, { handle: user.handle, contestId: todo.contestId, index: todo.index });
+      await api.post(`${API}/api/complete`, { handle: user.handle, day, contestId: todo.contestId, index: todo.index });
+      const verify = await api.post(`${API}/api/verify`, { handle: user.handle, contestId: todo.contestId, index: todo.index });
       const newState = verify.data.solved ? "solved" : "wrong";
       setTodoState(p => ({ ...p, [key]: newState }));
-      await axios.post(`${API}/api/progress/save`, { handle: user.handle, key, state: newState, problem: todo, day: Number(day) });
+      await api.post(`${API}/api/progress/save`, { handle: user.handle, key, state: newState, problem: todo, day: Number(day) });
     } catch {
       setTodoState(p => ({ ...p, [key]: "wrong" }));
-      await axios.post(`${API}/api/progress/save`, { handle: user.handle, key, state: "wrong", problem: todo, day: Number(day) }).catch(() => { });
+      await api.post(`${API}/api/progress/save`, { handle: user.handle, key, state: "wrong", problem: todo, day: Number(day) }).catch(() => { });
     }
   };
-
   const allTodos = plan?.plan?.flatMap(d => d.problems) || [];
   const allKeys = plan?.plan?.flatMap(d => d.problems.map(p => `${d.day}-${p.contestId}-${p.index}`)) || [];
   // Replace the existing solvedCount / wrongCount / pct lines with:
@@ -94,41 +95,30 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
   }, [todoState, plan]);
 
 
+  // 4. progress load useEffect — replace axios.get
   useEffect(() => {
     const loadProgress = async () => {
       if (!user?.handle) return;
-
       try {
-        const res = await axios.get(`${API}/api/progress/load`, {
+        const res = await api.get(`${API}/api/progress/load`, {
           params: { handle: user.handle }
         });
-
-        if (!res.data.success) {
-          console.error("Failed to load progress", res.error);
-          return;
-        }
-
-
+        if (!res.data.success) return;
         if (res.data?.states) {
-          console.log("Loaded progress", res.data.states);
-
           const loaded = Object.entries(res.data.states)
             .filter(([_, v]) => v.state === "solved" || v.state === "wrong")
             .map(([key, v]) => ({
               ...v.problem,
               key,
-              day: v.day,   // ← use the day stored in the progress record
+              day: v.day,
+              state: v.state,
             }));
-
-          setCompletedProblems(loaded); // ✅ THIS is the key
+          setCompletedProblems(loaded);
         }
-
-
       } catch (err) {
         console.error("Failed to load progress", err);
       }
     };
-
     loadProgress();
   }, [user?.handle]);
 
