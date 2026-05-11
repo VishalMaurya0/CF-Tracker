@@ -519,73 +519,61 @@ app.post("/api/friends/sync", async (req, res) => {
 // ─── ROUTE 2: GET /api/backlog?handle=YOUR_HANDLE ─────────────────────────────
 // Fetch all problems friends solved/attempted that you haven't solved
 app.get("/api/backlog", async (req, res) => {
-    const { handle } = req.query;
-    if (!handle) return res.status(400).json({ error: "handle required." });
+  const { handle } = req.query;
+  if (!handle) return res.status(400).json({ error: "handle required." });
 
-    try {
-        const settings = await UserSettings.findOne({ myHandle: handle });
-        if (!settings) return res.status(404).json({ error: "Run /api/setup first." });
+  try {
+    const settings = await UserSettings.findOne({ myHandle: handle });
+    if (!settings) return res.status(404).json({ error: "Run /api/setup first." });
 
-        const { practiceRating, friendHandles } = settings;
+    const { practiceRating, friendHandles } = settings;
 
-        // Read from Backlog collection but filter to only current friends
-        const allBacklog = await Backlog.find({ myHandle: handle })
-            .sort({ nearMyRating: -1, friendSolveCount: -1 });
+    // Get user's solved keys
+    const myCache = await UserSolvedCache.findOne({ myHandle: handle });
+    const mySolvedKeys = new Set(myCache?.solvedKeys || []);
 
-        // Keep only problems where at least one current friend is in solvedBy or attemptedBy
-        const backlog = allBacklog.filter(p => {
-            const hasCurrentFriendSolved = p.solvedBy?.some(f => friendHandles.includes(f));
-            const hasCurrentFriendAttempted = p.attemptedBy?.some(f => friendHandles.includes(f));
-            return hasCurrentFriendSolved || hasCurrentFriendAttempted;
-        }).map(p => ({
-            ...p.toObject(),
-            // Also strip removed friends from the display arrays
-            solvedBy: p.solvedBy?.filter(f => friendHandles.includes(f)),
-            attemptedBy: p.attemptedBy?.filter(f => friendHandles.includes(f)),
-            friendSolveCount: p.solvedBy?.filter(f => friendHandles.includes(f)).length,
-        }));
+    // Get verified-solved problems from progress states
+    const completedStates = await ProgressState.find({ myHandle: handle, state: "solved" });
+    const completedProblemKeys = new Set(
+      completedStates.map(s => {
+        // key format: "day-contestId-index" e.g. "1-2057-C"
+        const idx = s.key.indexOf("-", s.key.indexOf("-") + 1);
+        return s.key.slice(s.key.indexOf("-") + 1); // everything after first "-"
+      })
+    );
 
+    const allBacklog = await Backlog.find({ myHandle: handle })
+      .sort({ nearMyRating: -1, friendSolveCount: -1 });
 
-        // Get user's solved keys to hide from backlog
-const myCache = await UserSolvedCache.findOne({ myHandle: handle });
-const mySolvedKeys = new Set(myCache?.solvedKeys || []);
+    const backlog = allBacklog
+      .filter(p => {
+        const key = `${p.contestId}-${p.index}`;
+        if (mySolvedKeys.has(key)) return false;
+        if (completedProblemKeys.has(key)) return false;
+        const hasCurrentFriendSolved    = p.solvedBy?.some(f => friendHandles.includes(f));
+        const hasCurrentFriendAttempted = p.attemptedBy?.some(f => friendHandles.includes(f));
+        return hasCurrentFriendSolved || hasCurrentFriendAttempted;
+      })
+      .map(p => ({
+        ...p.toObject(),
+        solvedBy:         p.solvedBy?.filter(f => friendHandles.includes(f)),
+        attemptedBy:      p.attemptedBy?.filter(f => friendHandles.includes(f)),
+        friendSolveCount: p.solvedBy?.filter(f => friendHandles.includes(f)).length,
+      }));
 
-// Also get completed progress states
-const completedStates = await ProgressState.find({ myHandle: handle, state: "solved" });
-const completedKeys = new Set(completedStates.map(s => {
-  // key format is "day-contestId-index" — extract contestId-index
-  const parts = s.key.split("-");
-  return `${parts[1]}-${parts[2]}`;
-}));
-
-const backlog1 = allBacklog.filter(p => {
-  const key = `${p.contestId}-${p.index}`;
-  if (mySolvedKeys.has(key)) return false;
-  if (completedKeys.has(key)) return false;
-  const hasCurrentFriendSolved    = p.solvedBy?.some(f => friendHandles.includes(f));
-  const hasCurrentFriendAttempted = p.attemptedBy?.some(f => friendHandles.includes(f));
-  return hasCurrentFriendSolved || hasCurrentFriendAttempted;
-}).map(p => ({
-  ...p.toObject(),
-  solvedBy:        p.solvedBy?.filter(f => friendHandles.includes(f)),
-  attemptedBy:     p.attemptedBy?.filter(f => friendHandles.includes(f)),
-  friendSolveCount:p.solvedBy?.filter(f => friendHandles.includes(f)).length,
-}));
-
-
-        res.json({
-            success: true,
-            total: backlog1.length,
-            nearMyRating: backlog1.filter(p => p.nearMyRating).length,
-            practiceRating,
-            backlog1,
-            lastSynced: allBacklog[0]?.updatedAt || null,
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.json({
+      success:      true,
+      total:        backlog.length,
+      nearMyRating: backlog.filter(p => p.nearMyRating).length,
+      practiceRating,
+      backlog,
+      lastSynced:   allBacklog[0]?.updatedAt || null,
+    });
+  } catch (err) {
+    console.error("[Backlog] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
-
 
 
 // ─── ROUTE 3: POST /api/analyze ───────────────────────────────────────────────
@@ -1108,17 +1096,19 @@ const progressStateSchema = new mongoose.Schema({
     myHandle: String,
     key: String, // "day-contestId-index"
     state: String, // "solved" | "wrong"
+    problem: todoSchema,
+    day: Number,
     updatedAt: { type: Date, default: Date.now },
 });
 const ProgressState = mongoose.model("ProgressState", progressStateSchema);
 
 app.post("/api/progress/save", async (req, res) => {
-    const { handle, key, state } = req.body;
-    if (!handle || !key || !state) return res.status(400).json({ error: "handle, key, state required." });
+    const { handle, key, state, problem, day } = req.body;
+    if (!handle || !key || !state || !problem || !day) return res.status(400).json({ error: "handle, key, state, problem, day required." });
     try {
         await ProgressState.findOneAndUpdate(
             { myHandle: handle, key },
-            { myHandle: handle, key, state, updatedAt: new Date() },
+            { myHandle: handle, key, state, problem, day, updatedAt: new Date() },
             { upsert: true, new: true }
         );
         res.json({ success: true });
@@ -1131,7 +1121,7 @@ app.get("/api/progress/load", async (req, res) => {
     try {
         const states = await ProgressState.find({ myHandle: handle });
         const map = {};
-        for (const s of states) map[s.key] = s.state;
+        for (const s of states) {map[s.key] = {key: s.key, state: s.state, problem: s.problem, day: s.day}};
         res.json({ success: true, states: map });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import axios from "axios";
 
 export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodoState, hasBacklogAdditions, setHasBacklogAdditions }) {
@@ -6,42 +6,37 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [open, setOpen] = useState(1);
-  const [showCompleted, setShowCompleted] = useState(false);
+  const [showCompleted, setShowCompleted] = useState(true);
+  const [completedProblems, setCompletedProblems] = useState([]);
 
   const loadPlan = async (days) => {
     setLoading(true); setError("");
     try {
       const res = await axios.post(`${API}/api/plan`, { handle: user.handle, days: Number(days || planDays) });
       setPlan(res.data);
-      // Don't reset todoState — keep solved problems green after replan
       setHasBacklogAdditions(false);
     } catch (e) { setError(e.response?.data?.error || "Error generating plan."); }
     setLoading(false);
   };
 
-  const completedProblems = plan?.plan?.flatMap(d =>
-    d.problems
-      .filter(p => todoState[`${d.day}-${p.contestId}-${p.index}`] === "solved")
-      .map(p => ({ ...p, day: d.day, key: `${d.day}-${p.contestId}-${p.index}` }))
-  ) || [];
-
-
   const tickProblem = async (todo, day) => {
     const key = `${day}-${todo.contestId}-${todo.index}`;
     const current = todoState[key] || "pending";
 
-    // If already solved/wrong — allow untick
     if (current === "solved" || current === "wrong") {
       setTodoState(p => { const n = { ...p }; delete n[key]; return n; });
       try {
-        await axios.post(`${API}/api/uncomplete`, { handle: user.handle, day, contestId: todo.contestId, index: todo.index });
+        await axios.post(`${API}/api/uncomplete`, {
+          handle: user.handle,
+          day: Number(day),
+          contestId: todo.contestId,
+          index: todo.index,
+        });
       } catch { }
       return;
     }
 
     if (current === "checking") return;
-
-    // Mark as checking immediately
     setTodoState(p => ({ ...p, [key]: "checking" }));
 
     try {
@@ -49,19 +44,93 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
       const verify = await axios.post(`${API}/api/verify`, { handle: user.handle, contestId: todo.contestId, index: todo.index });
       const newState = verify.data.solved ? "solved" : "wrong";
       setTodoState(p => ({ ...p, [key]: newState }));
-      // Persist to DB
-      await axios.post(`${API}/api/progress/save`, { handle: user.handle, key, state: newState });
+      await axios.post(`${API}/api/progress/save`, { handle: user.handle, key, state: newState, problem: todo, day: Number(day) });
     } catch {
       setTodoState(p => ({ ...p, [key]: "wrong" }));
-      await axios.post(`${API}/api/progress/save`, { handle: user.handle, key, state: "wrong" }).catch(() => { });
+      await axios.post(`${API}/api/progress/save`, { handle: user.handle, key, state: "wrong", problem: todo, day: Number(day) }).catch(() => { });
     }
   };
 
   const allTodos = plan?.plan?.flatMap(d => d.problems) || [];
   const allKeys = plan?.plan?.flatMap(d => d.problems.map(p => `${d.day}-${p.contestId}-${p.index}`)) || [];
+  // Replace the existing solvedCount / wrongCount / pct lines with:
   const solvedCount = allKeys.filter(k => todoState[k] === "solved").length;
   const wrongCount = allKeys.filter(k => todoState[k] === "wrong").length;
-  const pct = allTodos.length ? Math.round((solvedCount / allTodos.length) * 100) : 0;
+  const completedPanelSolved = completedProblems.filter(p => p.state === "solved").length;
+  const completedPanelWrong = completedProblems.filter(p => p.state === "wrong").length;
+  // Union: use max of either source to avoid double-counting (same keys)
+  const totalSolved = Math.max(solvedCount, completedPanelSolved);
+  const totalWrong = Math.max(wrongCount, completedPanelWrong);
+  const pct = allTodos.length ? Math.round(((totalSolved + totalWrong) / allTodos.length) * 100) : 0;
+
+  useEffect(() => {
+    if (!plan) return;
+
+    setCompletedProblems(prev => {
+      const map = new Map();
+
+      // Rebuild from current todoState only
+      plan.plan.forEach(day => {
+        day.problems.forEach(p => {
+          const key = `${day.day}-${p.contestId}-${p.index}`;
+          const state = todoState[key];
+          if (state === "solved" || state === "wrong") {
+            map.set(key, { ...p, key, day: day.day, state });
+          }
+          // If key not in todoState or state is "pending"/"checking" → not added → effectively removed
+        });
+      });
+
+      // Also keep any from prev that aren't in the current plan days (edge case)
+      // but DO respect todoState — if key was deleted, drop it
+      prev.forEach(p => {
+        if (!map.has(p.key) && todoState[p.key]) {
+          map.set(p.key, p);
+        }
+      });
+
+      return Array.from(map.values());
+    });
+  }, [todoState, plan]);
+
+
+  useEffect(() => {
+    const loadProgress = async () => {
+      if (!user?.handle) return;
+
+      try {
+        const res = await axios.get(`${API}/api/progress/load`, {
+          params: { handle: user.handle }
+        });
+
+        if (!res.data.success) {
+          console.error("Failed to load progress", res.error);
+          return;
+        }
+
+
+        if (res.data?.states) {
+          console.log("Loaded progress", res.data.states);
+
+          const loaded = Object.entries(res.data.states)
+            .filter(([_, v]) => v.state === "solved" || v.state === "wrong")
+            .map(([key, v]) => ({
+              ...v.problem,
+              key,
+              day: v.day,   // ← use the day stored in the progress record
+            }));
+
+          setCompletedProblems(loaded); // ✅ THIS is the key
+        }
+
+
+      } catch (err) {
+        console.error("Failed to load progress", err);
+      }
+    };
+
+    loadProgress();
+  }, [user?.handle]);
 
   if (!plan) return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "60vh", gap: 20 }}>
@@ -93,7 +162,7 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
           <p style={{ fontSize: 13, color: "#555" }}>{plan.totalDays} days · {plan.totalProblems} problems · {plan.problemsPerDay}/day</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input type="text" inputmode="numeric" value={planDays} onChange={e => setPlanDays(Math.max(1, Number(e.target.value)))}
+          <input type="number" value={planDays} onChange={e => setPlanDays(Math.max(1, Number(e.target.value)))}
             min={1} max={90}
             style={{ width: 56, padding: "6px 8px", fontSize: 12, background: "#111", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none", textAlign: "center" }} />
           <span style={{ fontSize: 11, color: "#555" }}>days</span>
@@ -109,8 +178,8 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
           <span style={{ fontSize: 13, color: "#888" }}>Overall progress</span>
           <div style={{ display: "flex", gap: 16, fontSize: 12 }}>
-            <span style={{ color: "#4ade80" }}>✓ {solvedCount} verified</span>
-            <span style={{ color: "#f87171" }}>✗ {wrongCount} not on CF</span>
+            <span style={{ color: "#4ade80" }}>✓ {totalSolved} verified</span>
+            <span style={{ color: "#f87171" }}>✗ {totalWrong} not on CF</span>
             <span style={{ color: "#6c47ff", fontWeight: 600 }}>{pct}% done</span>
           </div>
         </div>
@@ -118,7 +187,7 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
           <div style={{ height: 6, width: `${pct}%`, background: "#6c47ff", borderRadius: 3, transition: "width .4s ease" }} />
         </div>
         <div style={{ fontSize: 11, color: "#444", marginTop: 8 }}>
-          Click a problem to mark done → CF verification runs automatically · Click again to untick
+          Click a problem to mark done → CF verification runs · Click again to untick
         </div>
       </div>
 
@@ -160,55 +229,26 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
                     const state = todoState[key] || "pending";
                     return (
                       <div key={key} onClick={() => tickProblem(p, day.day)}
-                        style={{
-                          padding: "10px 16px", display: "flex", alignItems: "center", gap: 12,
-                          borderBottom: i < day.problems.length - 1 ? "1px solid #0f0f0f" : "none",
-                          opacity: state === "solved" ? 0.6 : 1, cursor: "pointer",
-                          background: state === "checking" ? "#0d0d0d" : "transparent",
-                          transition: "opacity .3s, background .2s"
-                        }}>
+                        style={{ padding: "10px 16px", display: "flex", alignItems: "center", gap: 12, borderBottom: i < day.problems.length - 1 ? "1px solid #0f0f0f" : "none", opacity: state === "solved" ? 0.5 : 1, cursor: "pointer", background: state === "checking" ? "#0d0d0d" : "transparent", transition: "opacity .3s" }}>
 
-                        {/* Checkbox */}
                         <div style={{ width: 20, height: 20, borderRadius: 5, border: `1.5px solid ${state === "solved" ? "#4ade80" : state === "wrong" ? "#f87171" : state === "checking" ? "#444" : "#2a2a2a"}`, background: state === "solved" ? "#4ade80" : state === "wrong" ? "#1a0505" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 11, transition: "all .2s" }}>
                           {state === "checking" ? <span className="spin-sm" /> : state === "solved" ? "✓" : state === "wrong" ? "✗" : ""}
                         </div>
 
-                        {/* Rating */}
                         <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "#1a1a2e", color: "#a78bfa", minWidth: 36, textAlign: "center", flexShrink: 0 }}>
                           {p.rating}
                         </span>
 
-                        {/* Name */}
                         <span style={{ flex: 1, fontSize: 13, color: state === "solved" ? "#4ade80" : state === "wrong" ? "#f87171" : "#ccc", textDecoration: state === "solved" || state === "wrong" ? "line-through" : "none", transition: "color .3s" }}>
                           {p.name}
                         </span>
 
-                        {/* Friend solve count */}
-                        {p.friendSolveCount > 0 && (
-                          <span title={`${p.friendSolveCount} friend${p.friendSolveCount > 1 ? "s" : ""} solved this`}
-                            style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "#0a1a0a", color: "#4ade80", flexShrink: 0, whiteSpace: "nowrap" }}>
-                            👥 {p.friendSolveCount}
-                          </span>
-                        )}
-
-                        {/* Score */}
-                        {p.score > 0 && (
-                          <span title="Priority score"
-                            style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "#1a1040", color: "#a78bfa", flexShrink: 0 }}>
-                            ★ {p.score}
-                          </span>
-                        )}
-
-                        {/* Open link */}
                         <a href={p.url} target="_blank" rel="noreferrer"
                           onClick={e => e.stopPropagation()}
                           style={{ fontSize: 11, color: "#333", textDecoration: "none", flexShrink: 0 }}
                           onMouseOver={e => e.target.style.color = "#6c47ff"}
-                          onMouseOut={e => e.target.style.color = "#333"}>
-                          ↗
-                        </a>
+                          onMouseOut={e => e.target.style.color = "#333"}>↗</a>
 
-                        {/* Status label */}
                         <span style={{ fontSize: 10, color: state === "solved" ? "#4ade80" : state === "wrong" ? "#f87171" : state === "checking" ? "#555" : "#2a2a2a", minWidth: 70, textAlign: "right", flexShrink: 0 }}>
                           {state === "solved" ? "verified ✓" : state === "wrong" ? "not on CF" : state === "checking" ? "checking..." : "click to mark"}
                         </span>
@@ -227,9 +267,9 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
         <div style={{ fontSize: 11, color: "#555", marginBottom: 16, letterSpacing: 1 }}>PERFORMANCE</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
           {[
-            { label: "Verified solved", value: solvedCount, color: "#4ade80" },
-            { label: "Not on CF", value: wrongCount, color: "#f87171" },
-            { label: "Remaining", value: allTodos.length - solvedCount - wrongCount, color: "#888" },
+            { label: "Verified solved", value: totalSolved, color: "#4ade80" },
+            { label: "Not on CF", value: totalWrong, color: "#f87171" },
+            { label: "Remaining", value: allTodos.length - totalSolved - totalWrong, color: "#888" },
             { label: "Accuracy", value: `${pct}%`, color: "#6c47ff" },
           ].map(s => (
             <div key={s.label} style={{ textAlign: "center", padding: "12px", background: "#0d0d0d", borderRadius: 8 }}>
@@ -240,50 +280,67 @@ export default function PlanPanel({ API, user, plan, setPlan, todoState, setTodo
         </div>
       </div>
 
-      {/* Completed problems — persists through replan */}
+      {/* ── Completed problems section ── */}
       {completedProblems.length > 0 && (
         <div style={{ marginTop: 16 }}>
-          <div
-            onClick={() => setShowCompleted(!showCompleted)}
-            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", padding: "10px 0", borderTop: "1px solid #1a1a1a" }}>
+          <div onClick={() => setShowCompleted(!showCompleted)}
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", padding: "12px 0", borderTop: "1px solid #1a1a1a" }}>
             <span style={{ fontSize: 13, color: "#4ade80", fontWeight: 500 }}>
-              ✓ Completed problems ({completedProblems.length})
+              ✓ Completed ({completedProblems.length})
             </span>
             <span style={{ fontSize: 12, color: "#333" }}>{showCompleted ? "▲" : "▼"}</span>
           </div>
 
           {showCompleted && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {completedProblems.map(p => (
-                <div key={p.key} style={{ background: "#0a1a0a", border: "1px solid #0a2a0a", borderRadius: 8, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
-                  {/* Untick */}
-                  <button
-                    onClick={() => tickProblem(p, p.day)}
-                    title="Untick"
-                    style={{ width: 20, height: 20, borderRadius: 5, border: "1.5px solid #4ade80", background: "#4ade80", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, cursor: "pointer", flexShrink: 0 }}>
-                    ✓
-                  </button>
+              {completedProblems.map(p => {
+                const isVerified = p.state === "solved";
+                const color = isVerified ? "#4ade80" : "#f87171";
+                const bg = isVerified ? "#0a1a0a" : "#1a0505";
+                const border = isVerified ? "#0d2a0d" : "#2a0d0d";
 
-                  <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "#1a1a2e", color: "#a78bfa", minWidth: 36, textAlign: "center", flexShrink: 0 }}>
-                    {p.rating}
-                  </span>
+                return (
+                  <div key={p.key}
+                    style={{ background: bg, border: `1px solid ${border}`, borderRadius: 8, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
 
-                  <span style={{ flex: 1, fontSize: 13, color: "#4ade80", textDecoration: "line-through" }}>
-                    {p.name}
-                  </span>
+                    <div
+                      onClick={() => tickProblem(p, p.day)}
+                      title="Click to untick"
+                      style={{
+                        width: 20, height: 20, borderRadius: 5,
+                        border: `1.5px solid ${color}`, background: color,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 11, flexShrink: 0, color: "#000",
+                        cursor: "pointer",
+                        transition: "opacity .2s",
+                      }}
+                      onMouseOver={e => e.currentTarget.style.opacity = "0.7"}
+                      onMouseOut={e => e.currentTarget.style.opacity = "1"}
+                    >
+                      {isVerified ? "✓" : "✗"}
+                    </div>
 
-                  <span style={{ fontSize: 11, color: "#1a4a1a" }}>{p.topic}</span>
+                    <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "#1a1a2e", color: "#a78bfa", minWidth: 36, textAlign: "center", flexShrink: 0 }}>
+                      {p.rating}
+                    </span>
 
-                  <a href={p.url} target="_blank" rel="noreferrer"
-                    style={{ fontSize: 11, color: "#1a4a1a", textDecoration: "none" }}
-                    onMouseOver={e => e.target.style.color = "#4ade80"}
-                    onMouseOut={e => e.target.style.color = "#1a4a1a"}>
-                    ↗
-                  </a>
+                    <span style={{ flex: 1, fontSize: 13, color, textDecoration: "line-through" }}>
+                      {p.name}
+                    </span>
 
-                  <span style={{ fontSize: 10, color: "#4ade80" }}>verified ✓</span>
-                </div>
-              ))}
+                    <span style={{ fontSize: 11, color: isVerified ? "#1a4a1a" : "#4a1a1a", flexShrink: 0 }}>{p.topic}</span>
+
+                    <a href={p.url} target="_blank" rel="noreferrer"
+                      style={{ fontSize: 11, color: isVerified ? "#1a4a1a" : "#4a1a1a", textDecoration: "none", flexShrink: 0 }}
+                      onMouseOver={e => e.target.style.color = color}
+                      onMouseOut={e => e.target.style.color = isVerified ? "#1a4a1a" : "#4a1a1a"}>↗</a>
+
+                    <span style={{ fontSize: 10, color, flexShrink: 0 }}>
+                      {isVerified ? "verified ✓" : "not on CF ✗"}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
