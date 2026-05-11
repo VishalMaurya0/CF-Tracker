@@ -26,6 +26,7 @@ const userSettingsSchema = new mongoose.Schema({
     friendHandles: [String],
     practiceRating: { type: Number, default: 1200 },
     currentRating: { type: Number, default: 1200 },
+    ratingRange: { type: Number, default: 200 },
     updatedAt: { type: Date, default: Date.now },
 });
 const UserSettings = mongoose.model("UserSettings", userSettingsSchema);
@@ -217,8 +218,8 @@ const rebuildBacklog = async (myHandle) => {
     const settings = await UserSettings.findOne({ myHandle });
     if (!settings) throw new Error("User not found.");
 
-    const { friendHandles, practiceRating } = settings;
-    const RATING_RANGE = 200;
+    const { friendHandles, practiceRating, ratingRange } = settings;
+    const RATING_RANGE = ratingRange ?? 200;
 
     // Get your solved keys from cache
     const myCache = await UserSolvedCache.findOne({ myHandle });
@@ -300,7 +301,7 @@ const rebuildBacklog = async (myHandle) => {
 // ─── ROUTE 1: POST /api/setup ─────────────────────────────────────────────────
 // Save your CF handle, friends, and practice rating
 app.post("/api/setup", async (req, res) => {
-    const { myHandle, friendHandles, practiceRating } = req.body;
+    const { myHandle, friendHandles, practiceRating, ratingRange } = req.body;
 
     if (!myHandle) return res.status(400).json({ error: "myHandle is required." });
     if (!Array.isArray(friendHandles)) {
@@ -342,6 +343,7 @@ app.post("/api/setup", async (req, res) => {
                 friendHandles: finalFriends,
                 practiceRating: practiceRating || currentRating,
                 currentRating,
+                ...(ratingRange !== undefined && { ratingRange: Number(ratingRange) }),
                 updatedAt: new Date(),
             },
             { upsert: true, new: true }
@@ -543,12 +545,40 @@ app.get("/api/backlog", async (req, res) => {
             friendSolveCount: p.solvedBy?.filter(f => friendHandles.includes(f)).length,
         }));
 
+
+        // Get user's solved keys to hide from backlog
+const myCache = await UserSolvedCache.findOne({ myHandle: handle });
+const mySolvedKeys = new Set(myCache?.solvedKeys || []);
+
+// Also get completed progress states
+const completedStates = await ProgressState.find({ myHandle: handle, state: "solved" });
+const completedKeys = new Set(completedStates.map(s => {
+  // key format is "day-contestId-index" — extract contestId-index
+  const parts = s.key.split("-");
+  return `${parts[1]}-${parts[2]}`;
+}));
+
+const backlog1 = allBacklog.filter(p => {
+  const key = `${p.contestId}-${p.index}`;
+  if (mySolvedKeys.has(key)) return false;
+  if (completedKeys.has(key)) return false;
+  const hasCurrentFriendSolved    = p.solvedBy?.some(f => friendHandles.includes(f));
+  const hasCurrentFriendAttempted = p.attemptedBy?.some(f => friendHandles.includes(f));
+  return hasCurrentFriendSolved || hasCurrentFriendAttempted;
+}).map(p => ({
+  ...p.toObject(),
+  solvedBy:        p.solvedBy?.filter(f => friendHandles.includes(f)),
+  attemptedBy:     p.attemptedBy?.filter(f => friendHandles.includes(f)),
+  friendSolveCount:p.solvedBy?.filter(f => friendHandles.includes(f)).length,
+}));
+
+
         res.json({
             success: true,
-            total: backlog.length,
-            nearMyRating: backlog.filter(p => p.nearMyRating).length,
+            total: backlog1.length,
+            nearMyRating: backlog1.filter(p => p.nearMyRating).length,
             practiceRating,
-            backlog,
+            backlog1,
             lastSynced: allBacklog[0]?.updatedAt || null,
         });
     } catch (err) {
@@ -753,12 +783,38 @@ Respond ONLY with valid JSON, no other text, no markdown:
             }
         }
 
-        // Sort by score — multi-topic problems first
-        allCandidates.sort((a, b) => b.score - a.score);
+        // ── Score surviving backlog problems + merge with AI candidates ──────
+        const backlogItems = await PriorityQueue.find({ myHandle: handle, fromBacklog: true, done: false });
+        const backlogCandidates = [];
 
-        // Save to priority queue
-        for (let i = 0; i < allCandidates.length; i++) {
-            const p = allCandidates[i];
+        const backlogDocs = await Backlog.find({ myHandle: handle });
+        const friendSolveCountMap = {};
+        for (const doc of backlogDocs) {
+            const key = `${doc.contestId}-${doc.index}`;
+            friendSolveCountMap[key] = doc.friendSolveCount || 0;
+        }
+
+        for (const p of backlogItems) {
+            const key = `${p.contestId}-${p.index}`;
+            if (solvedKeys.has(key)) continue;
+            const weakTopicsCovered = (p.tags || []).filter(t => weakTopicNames.includes(t));
+            const ratingBonus = p.rating ? Math.max(0, 10 - Math.floor(Math.abs(p.rating - practiceRating) / 50)) : 0;
+            const friendBonus = (friendSolveCountMap[key] || 0) * 5;
+            const score = (weakTopicsCovered.length * 10) + ratingBonus + friendBonus;
+            backlogCandidates.push({ key, contestId: p.contestId, index: p.index, name: p.name, rating: p.rating, tags: p.tags || [], primaryTopic: p.topic, url: p.url, score, fromBacklog: true });
+            await PriorityQueue.deleteOne({ myHandle: handle, contestId: p.contestId, index: p.index });
+        }
+
+        // Apply friend bonus to AI candidates too
+        for (const p of allCandidates) {
+            p.score += (friendSolveCountMap[p.key] || 0) * 5;
+        }
+
+        const merged = [...allCandidates, ...backlogCandidates];
+        merged.sort((a, b) => b.score - a.score);
+
+        for (let i = 0; i < merged.length; i++) {
+            const p = merged[i];
             await PriorityQueue.create({
                 myHandle: handle,
                 contestId: p.contestId,
@@ -768,8 +824,9 @@ Respond ONLY with valid JSON, no other text, no markdown:
                 tags: p.tags,
                 topic: p.primaryTopic,
                 priority: i + 1,
-                url: `https://codeforces.com/problemset/problem/${p.contestId}/${p.index}`,
+                url: p.url || `https://codeforces.com/problemset/problem/${p.contestId}/${p.index}`,
                 done: false,
+                fromBacklog: p.fromBacklog || false,
             });
         }
 
@@ -812,6 +869,13 @@ app.post("/api/plan", async (req, res) => {
 
         const PROBLEMS_PER_DAY = Math.ceil(queue.length / days);
         console.log(`[Plan] ${queue.length} problems → ${days} days → ~${PROBLEMS_PER_DAY}/day`);
+
+        // Build friendSolveCount lookup from Backlog collection
+        const backlogDocs = await Backlog.find({ myHandle: handle });
+        const friendSolveCountMap = {};
+        for (const doc of backlogDocs) {
+            friendSolveCountMap[`${doc.contestId}-${doc.index}`] = doc.friendSolveCount || 0;
+        }
 
         // ── Interleave topics so each day has variety ─────────────────────
         // Group problems by topic
@@ -874,6 +938,8 @@ app.post("/api/plan", async (req, res) => {
                     rating: p.rating,
                     topic: p.topic,
                     url: p.url,
+                    friendSolveCount: friendSolveCountMap[`${p.contestId}-${p.index}`] || 0,
+                    score: p.score || 0,
                 })),
             });
         }
@@ -1088,7 +1154,16 @@ app.post("/api/uncomplete", async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-
+// GET /api/queue/added?handle=X — returns all problem keys in priority queue
+app.get("/api/queue/added", async (req, res) => {
+  const { handle } = req.query;
+  if (!handle) return res.status(400).json({ error: "handle required." });
+  try {
+    const queue = await PriorityQueue.find({ myHandle: handle });
+    const keys = queue.map(p => `${p.contestId}-${p.index}`);
+    res.json({ success: true, keys });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 
 

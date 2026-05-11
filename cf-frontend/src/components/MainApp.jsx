@@ -38,6 +38,8 @@ export default function MainApp({ API, user, setUser, onLogout }) {
                 rating: t.rating,
                 topic: t.topic,
                 url: t.url,
+                friendSolveCount: t.friendSolveCount || 0,
+                score: t.score || 0,
               })),
             })),
           });

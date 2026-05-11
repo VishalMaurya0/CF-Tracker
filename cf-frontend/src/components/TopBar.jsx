@@ -1,13 +1,12 @@
 import { useState } from "react";
 import axios from "axios";
 
-const syncSettings = (API, user, friendHandles, practiceRating, ratingMin, ratingMax) => {
+const syncSettings = (API, user, friendHandles, practiceRating, ratingRange) => {
   axios.post(`${API}/api/setup`, {
     myHandle: user.handle,
     friendHandles,
     practiceRating,
-    ratingMin,
-    ratingMax,
+    ratingRange,
   }).catch(() => {});
 };
 
@@ -20,35 +19,32 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
   // Editable rating state
   const [editingRating, setEditingRating] = useState(false);
   const [ratingDraft, setRatingDraft] = useState(user.practiceRating || "");
-  const [ratingMinDraft, setRatingMinDraft] = useState(user.ratingMin || "");
-  const [ratingMaxDraft, setRatingMaxDraft] = useState(user.ratingMax || "");
+  const [rangeDraft, setRangeDraft] = useState(user.ratingRange ?? 200);
   const [ratingErr, setRatingErr] = useState("");
+
+  const openRatingEdit = () => {
+    setRatingDraft(user.practiceRating || "");
+    setRangeDraft(user.ratingRange ?? 200);
+    setRatingErr("");
+    setEditingRating(true);
+    setShowFriends(false);
+  };
 
   const saveRating = () => {
     const pr = Number(ratingDraft);
-    const mn = ratingMinDraft !== "" ? Number(ratingMinDraft) : null;
-    const mx = ratingMaxDraft !== "" ? Number(ratingMaxDraft) : null;
-
-    if (!pr || pr < 800 || pr > 3500) {
-      setRatingErr("Rating must be 800–3500.");
-      return;
-    }
-    if (mn !== null && mx !== null && mn >= mx) {
-      setRatingErr("Min must be less than max.");
-      return;
-    }
+    const rng = Number(rangeDraft);
+    if (!pr || pr < 800 || pr > 3500) { setRatingErr("Rating must be 800–3500."); return; }
+    if (!rng || rng < 50 || rng > 1000) { setRatingErr("Range must be 50–1000."); return; }
     setRatingErr("");
     setEditingRating(false);
-
-    const updated = { ...user, practiceRating: pr, ratingMin: mn, ratingMax: mx };
+    const updated = { ...user, practiceRating: pr, ratingRange: rng };
     setUser(updated);
-    syncSettings(API, updated, friends, pr, mn, mx);
+    syncSettings(API, updated, friends, pr, rng);
   };
 
   const cancelRating = () => {
     setRatingDraft(user.practiceRating || "");
-    setRatingMinDraft(user.ratingMin || "");
-    setRatingMaxDraft(user.ratingMax || "");
+    setRangeDraft(user.ratingRange ?? 200);
     setRatingErr("");
     setEditingRating(false);
   };
@@ -56,23 +52,20 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
   const addFriend = () => {
     const h = friendInput.trim().toLowerCase();
     if (!h) { setFriendErr("Enter a handle."); return; }
-    if (friends.map(f => f.toLowerCase()).includes(h)) {
-      setFriendErr("Already added.");
-      return;
-    }
+    if (friends.map(f => f.toLowerCase()).includes(h)) { setFriendErr("Already added."); return; }
     setFriendErr("");
     const newFriends = [...friends, h];
     setFriends(newFriends);
     setUser({ ...user, friendHandles: newFriends });
     setFriendInput("");
-    syncSettings(API, user, newFriends, user.practiceRating, user.ratingMin, user.ratingMax);
+    syncSettings(API, user, newFriends, user.practiceRating, user.ratingRange ?? 200);
   };
 
   const removeFriend = (handleToRemove) => {
     const newFriends = friends.filter(f => f !== handleToRemove);
     setFriends(newFriends);
     setUser({ ...user, friendHandles: newFriends });
-    syncSettings(API, user, newFriends, user.practiceRating, user.ratingMin, user.ratingMax);
+    syncSettings(API, user, newFriends, user.practiceRating, user.ratingRange ?? 200);
   };
 
   const TABS = [
@@ -107,35 +100,21 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
             </span>
           ) : null}
 
-          {/* Practice rating — click pencil to edit */}
+          {/* Practice rating — click ✎ to edit */}
           {!editingRating ? (
             <span style={{ color: "#555", display: "flex", alignItems: "center", gap: 5 }}>
-              Practice:&nbsp;
-              <span style={{ color: "#6c47ff", fontWeight: 600 }}>{user.practiceRating || "—"}</span>
-              {(user.ratingMin || user.ratingMax) && (
-                <span style={{ color: "#333", fontSize: 10 }}>
-                  ({user.ratingMin ?? "?"}–{user.ratingMax ?? "?"})
-                </span>
-              )}
+              Practice:&nbsp;<span style={{ color: "#6c47ff", fontWeight: 600 }}>{user.practiceRating || "—"}</span>
+              <span style={{ color: "#333", fontSize: 10 }}>±{user.ratingRange ?? 200}</span>
               <button
-                onClick={() => {
-                  setRatingDraft(user.practiceRating || "");
-                  setRatingMinDraft(user.ratingMin ?? "");
-                  setRatingMaxDraft(user.ratingMax ?? "");
-                  setEditingRating(true);
-                  setShowFriends(false);
-                }}
+                onClick={openRatingEdit}
                 style={{ background: "transparent", border: "none", color: "#333", cursor: "pointer", fontSize: 11, padding: "0 2px", lineHeight: 1 }}
                 onMouseOver={e => e.target.style.color = "#6c47ff"}
                 onMouseOut={e => e.target.style.color = "#333"}
                 title="Edit practice rating & range"
-              >
-                ✎
-              </button>
+              >✎</button>
             </span>
           ) : (
-            /* Inline edit popover */
-            <div style={{ position: "absolute", top: 46, right: 90, background: "#111", border: "1px solid #2a2a3e", borderRadius: 10, padding: "14px", zIndex: 300, width: 240, boxShadow: "0 8px 32px #000a", animation: "fadeIn .15s ease" }}>
+            <div style={{ position: "absolute", top: 46, right: 90, background: "#111", border: "1px solid #2a2a3e", borderRadius: 10, padding: "14px", zIndex: 300, width: 220, boxShadow: "0 8px 32px #000a", animation: "fadeIn .15s ease" }}>
               <div style={{ fontSize: 11, color: "#555", marginBottom: 10, letterSpacing: 1 }}>EDIT RATINGS</div>
 
               <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 4 }}>Practice rating</label>
@@ -150,25 +129,16 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
               />
 
               <label style={{ fontSize: 11, color: "#555", display: "block", marginBottom: 4 }}>
-                Problem rating range&nbsp;<span style={{ color: "#333" }}>(optional)</span>
+                Rating range&nbsp;<span style={{ color: "#333" }}>(±, default 200)</span>
               </label>
-              <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
-                <input
-                  type="number"
-                  value={ratingMinDraft}
-                  onChange={e => setRatingMinDraft(e.target.value)}
-                  placeholder="Min"
-                  style={{ flex: 1, padding: "6px 8px", fontSize: 12, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none" }}
-                />
-                <span style={{ color: "#333", fontSize: 12 }}>–</span>
-                <input
-                  type="number"
-                  value={ratingMaxDraft}
-                  onChange={e => setRatingMaxDraft(e.target.value)}
-                  placeholder="Max"
-                  style={{ flex: 1, padding: "6px 8px", fontSize: 12, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none" }}
-                />
-              </div>
+              <input
+                type="number"
+                value={rangeDraft}
+                onChange={e => setRangeDraft(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && saveRating()}
+                placeholder="200"
+                style={{ width: "100%", padding: "6px 8px", fontSize: 13, background: "#0a0a0a", border: "1px solid #222", borderRadius: 6, color: "#fff", outline: "none", boxSizing: "border-box", marginBottom: 12 }}
+              />
 
               {ratingErr && <div style={{ fontSize: 11, color: "#f87171", marginBottom: 8 }}>{ratingErr}</div>}
 
@@ -223,9 +193,7 @@ export default function TopBar({ user, setUser, API, section, setSection, analys
                     style={{ background: "transparent", border: "none", color: "#333", cursor: "pointer", fontSize: 14, padding: "0 4px", lineHeight: 1 }}
                     onMouseOver={e => e.target.style.color = "#f87171"}
                     onMouseOut={e => e.target.style.color = "#333"}
-                  >
-                    ×
-                  </button>
+                  >×</button>
                 </div>
               ))}
             </div>
