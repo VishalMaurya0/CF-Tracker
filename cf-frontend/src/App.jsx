@@ -4,7 +4,7 @@ import MainApp from "./components/MainApp";
 import LoginPanel from "./components/LoginPanel";
 import "./index.css";
 
-const API = "http://localhost:3001";
+const API = "https://cf-tracker-lwv5.onrender.com";
 
 const makeClient = (token) => axios.create({
     headers: token ? { Authorization: `Bearer ${token}` } : {},
