@@ -32,7 +32,7 @@ export default function AnalyzePanel({ API, api, user, analysis, setAnalysis, on
     });
 
     try {
-      const res = await api.post(`${API}/api/analyze`, { handle: user.handle, days: Number(days) });
+      const res = await api.post(`${API}/api/analyze`, { days: Number(days) });
       setLog(prev => [...prev, `✓ Done — ${res.data.priorityQueueSize} problems queued.`]);
       setTimeout(() => setAnalysis(res.data), 600);
     } catch (e) {
@@ -45,7 +45,7 @@ export default function AnalyzePanel({ API, api, user, analysis, setAnalysis, on
   const runPlan = async () => {
     setPlanning(true); setError("");
     try {
-      await api.post(`${API}/api/plan`, { handle: user.handle, days: Number(planDays) });
+      await api.post(`${API}/api/plan`, { days: Number(planDays) });
       onGoToPlan();
     } catch (e) { setError(e.response?.data?.error || "Error generating plan."); }
     setPlanning(false);

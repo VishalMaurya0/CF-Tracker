@@ -15,7 +15,7 @@ export default function PlanPanel({ API, api, user, plan, setPlan, todoState, se
     setCompletedProblems([]);
     setTodoState({});
     try {
-      const res = await api.post(`${API}/api/plan`, { handle: user.handle, days: Number(days || planDays) });
+      const res = await api.post(`${API}/api/plan`, { days: Number(days || planDays) });
       setPlan(res.data);
       setHasBacklogAdditions(false);
     } catch (e) { setError(e.response?.data?.error || "Error generating plan."); }
@@ -31,7 +31,7 @@ export default function PlanPanel({ API, api, user, plan, setPlan, todoState, se
       setTodoState(p => { const n = { ...p }; delete n[key]; return n; });
       try {
         await api.post(`${API}/api/uncomplete`, {
-          handle: user.handle, day: Number(day),
+          day: Number(day),
           contestId: todo.contestId, index: todo.index,
         });
       } catch { }
@@ -42,14 +42,14 @@ export default function PlanPanel({ API, api, user, plan, setPlan, todoState, se
     setTodoState(p => ({ ...p, [key]: "checking" }));
 
     try {
-      await api.post(`${API}/api/complete`, { handle: user.handle, day, contestId: todo.contestId, index: todo.index });
-      const verify = await api.post(`${API}/api/verify`, { handle: user.handle, contestId: todo.contestId, index: todo.index });
+      await api.post(`${API}/api/complete`, { day, contestId: todo.contestId, index: todo.index });
+      const verify = await api.post(`${API}/api/verify`, { contestId: todo.contestId, index: todo.index });
       const newState = verify.data.solved ? "solved" : "wrong";
       setTodoState(p => ({ ...p, [key]: newState }));
-      await api.post(`${API}/api/progress/save`, { handle: user.handle, key, state: newState, problem: todo, day: Number(day) });
+      await api.post(`${API}/api/progress/save`, { key, state: newState, problem: todo, day: Number(day) });
     } catch {
       setTodoState(p => ({ ...p, [key]: "wrong" }));
-      await api.post(`${API}/api/progress/save`, { handle: user.handle, key, state: "wrong", problem: todo, day: Number(day) }).catch(() => { });
+      await api.post(`${API}/api/progress/save`, { key, state: "wrong", problem: todo, day: Number(day) }).catch(() => { });
     }
   };
   const allTodos = plan?.plan?.flatMap(d => d.problems) || [];
@@ -100,9 +100,7 @@ export default function PlanPanel({ API, api, user, plan, setPlan, todoState, se
     const loadProgress = async () => {
       if (!user?.handle) return;
       try {
-        const res = await api.get(`${API}/api/progress/load`, {
-          params: { handle: user.handle }
-        });
+        const res = await api.get(`${API}/api/progress/load`);
         if (!res.data.success) return;
         if (res.data?.states) {
           const loaded = Object.entries(res.data.states)

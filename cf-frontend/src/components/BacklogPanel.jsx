@@ -19,8 +19,8 @@ export default function BacklogPanel({ API, api, user, onAddedToQueue }) {
     setLoading(true); setError("");
     try {
       const [backlogRes, queueRes] = await Promise.all([
-        api.get(`${API}/api/backlog`, { params: { handle: user.handle } }),
-        api.get(`${API}/api/queue/added`, { params: { handle: user.handle } }),
+        api.get(`${API}/api/backlog`,),
+        api.get(`${API}/api/queue/added`,),
       ]);
       setData(backlogRes.data);
       setQueuedKeys(new Set(queueRes.data.keys || []));
@@ -35,7 +35,7 @@ export default function BacklogPanel({ API, api, user, onAddedToQueue }) {
     }
     setSyncing(true); setError(""); setSyncResult(null);
     try {
-      const res = await api.post(`${API}/api/friends/sync`, { handle: user.handle });
+      const res = await api.post(`${API}/api/friends/sync`);
       setSyncResult(res.data);
       await loadFromDB();
     } catch (e) { setError(e.response?.data?.error || "Error syncing."); }
@@ -47,7 +47,7 @@ export default function BacklogPanel({ API, api, user, onAddedToQueue }) {
     setAdding(prev => ({ ...prev, [key]: true }));
     try {
       await api.post(`${API}/api/queue/add`, {
-        handle: user.handle, contestId: p.contestId, index: p.index,
+        contestId: p.contestId, index: p.index,
         name: p.name, rating: p.rating, tags: p.tags,
         topic: p.tags?.[0] || "backlog", url: p.url,
       });
