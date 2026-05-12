@@ -12,7 +12,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "cf_tracker_secret_change_in_prod";
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
