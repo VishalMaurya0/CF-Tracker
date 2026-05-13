@@ -26,7 +26,7 @@ export default function MainApp({ API, api, user, setUser, onLogout }) {
                             day: d.day, date: d.date,
                             focus: [...new Set(d.todos.map(t => t.topic))].join(" + "),
                             problemCount: d.todos.length,
-                            problems: d.todos.map(t => ({ contestId: t.contestId, index: t.index, name: t.name, rating: t.rating, topic: t.topic, url: t.url, friendSolveCount: 0, score: 0 })),
+                            problems: d.todos.map(t => ({ contestId: t.contestId, index: t.index, name: t.name, rating: t.rating, topic: t.topic, url: t.url, friendSolveCount: t.friendSolveCount || 0, score: t.score || 0 })),
                         })),
                     });
                 }

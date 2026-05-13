@@ -101,18 +101,24 @@ export default function PlanPanel({ API, api, user, plan, setPlan, todoState, se
       if (!user?.handle) return;
       try {
         const res = await api.get(`${API}/api/progress/load`);
-        if (!res.data.success) return;
-        if (res.data?.states) {
-          const loaded = Object.entries(res.data.states)
-            .filter(([_, v]) => v.state === "solved" || v.state === "wrong")
-            .map(([key, v]) => ({
-              ...v.problem,
-              key,
-              day: v.day,
-              state: v.state,
-            }));
-          setCompletedProblems(loaded);
-        }
+        if (!res.data?.states) return;
+
+        const entries = Object.entries(res.data.states)
+          .filter(([_, v]) => v.state === "solved" || v.state === "wrong");
+
+        // ✅ restore tick marks
+        const restoredTodoState = {};
+        entries.forEach(([key, v]) => {
+          restoredTodoState[key] = v.state;
+        });
+        setTodoState(prev => ({ ...prev, ...restoredTodoState }));
+
+        // restore completed panel
+        const loaded = entries.map(([key, v]) => ({
+          ...v.problem, key, day: v.day, state: v.state,
+        }));
+        setCompletedProblems(loaded);
+
       } catch (err) {
         console.error("Failed to load progress", err);
       }
@@ -230,6 +236,24 @@ export default function PlanPanel({ API, api, user, plan, setPlan, todoState, se
                         <span style={{ flex: 1, fontSize: 13, color: state === "solved" ? "#4ade80" : state === "wrong" ? "#f87171" : "#ccc", textDecoration: state === "solved" || state === "wrong" ? "line-through" : "none", transition: "color .3s" }}>
                           {p.name}
                         </span>
+
+                        {p.score > 0 && (
+                          <span style={{
+                            fontSize: 10, padding: "2px 6px", borderRadius: 4,
+                            background: "#1a1a0a", color: "#fbbf24", flexShrink: 0,
+                          }}>
+                            ⭐ {p.score}
+                          </span>
+                        )}
+
+                        {p.friendSolveCount > 0 && (
+                          <span style={{
+                            fontSize: 10, padding: "2px 6px", borderRadius: 4,
+                            background: "#0a1a0a", color: "#4ade80", flexShrink: 0
+                          }}>
+                            👥 {p.friendSolveCount}
+                          </span>
+                        )}
 
                         <a href={p.url} target="_blank" rel="noreferrer"
                           onClick={e => e.stopPropagation()}

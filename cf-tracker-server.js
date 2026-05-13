@@ -71,12 +71,16 @@ const priorityQueueSchema = new mongoose.Schema({
     url: String, done: { type: Boolean, default: false },
     fromBacklog: { type: Boolean, default: false },
     addedAt: { type: Date, default: Date.now },
+    score: { type: Number, default: 0 },
+    friendSolveCount: { type: Number, default: 0 },
 });
 const PriorityQueue = mongoose.model("PriorityQueue", priorityQueueSchema);
 
 const todoSchema = new mongoose.Schema({
     contestId: Number, index: String, name: String, rating: Number,
     url: String, topic: String, done: { type: Boolean, default: false },
+    score: { type: Number, default: 0 },
+    friendSolveCount: { type: Number, default: 0 },
 });
 const planSchema = new mongoose.Schema({
     myHandle: String, day: Number, date: Date, todos: [todoSchema],
@@ -389,8 +393,6 @@ app.post("/api/setup", requireAuth, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── SSE sync route
-
 app.get("/api/friends/sync/stream", (req, res, next) => {
     if (req.query.token) req.headers["authorization"] = `Bearer ${req.query.token}`;
     next();
@@ -661,7 +663,13 @@ Respond ONLY with valid JSON:
         const merged = [...allCandidates, ...backlogCandidates].sort((a, b) => b.score - a.score);
         for (let i = 0; i < merged.length; i++) {
             const p = merged[i];
-            await PriorityQueue.create({ myHandle: handle, contestId: p.contestId, index: p.index, name: p.name, rating: p.rating, tags: p.tags, topic: p.primaryTopic, priority: i + 1, url: p.url || `https://codeforces.com/problemset/problem/${p.contestId}/${p.index}`, done: false, fromBacklog: p.fromBacklog || false });
+            await PriorityQueue.create({
+                myHandle: handle, contestId: p.contestId, index: p.index, name: p.name,
+                rating: p.rating, tags: p.tags, topic: p.primaryTopic, priority: i + 1,
+                url: p.url || `...`, done: false, fromBacklog: p.fromBacklog || false,
+                score: p.score || 0,
+                friendSolveCount: friendSolveCountMap[`${p.contestId}-${p.index}`] || 0,
+            });
         }
 
         const savedCount = await PriorityQueue.countDocuments({ myHandle: handle });
@@ -674,12 +682,33 @@ app.post("/api/plan", requireAuth, async (req, res) => {
     const handle = req.userHandle;
     if (!days) return res.status(400).json({ error: "days required." });
     try {
+        const settings = await UserSettings.findOne({ myHandle: handle });
         const queue = await PriorityQueue.find({ myHandle: handle, done: false }).sort({ priority: 1 });
         if (queue.length === 0) return res.status(400).json({ error: "Priority queue empty. Run /api/analyze first." });
-        const PROBLEMS_PER_DAY = Math.ceil(queue.length / days);
+
+        const PROBLEMS_PER_DAY = Math.ceil(queue.length / days); // ✅ moved here
+
+        // backlog-based friend counts
         const backlogDocs = await Backlog.find({ myHandle: handle });
         const friendSolveCountMap = {};
-        for (const doc of backlogDocs) friendSolveCountMap[`${doc.contestId}-${doc.index}`] = doc.friendSolveCount || 0;
+        for (const doc of backlogDocs)
+            friendSolveCountMap[`${doc.contestId}-${doc.index}`] = doc.friendSolveCount || 0;
+
+        // fallback: count from FriendProblems for AI-recommended problems not in backlog
+        const allFriendCaches = await FriendProblems.find({ handle: { $in: settings.friendHandles } });
+        const friendSolveFromCache = {};
+        for (const fc of allFriendCaches) {
+            for (const p of fc.solved) {
+                const key = `${p.contestId}-${p.index}`;
+                friendSolveFromCache[key] = (friendSolveFromCache[key] || 0) + 1;
+            }
+        }
+
+        // single function used everywhere
+        const getFriendCount = (contestId, index) => {
+            const key = `${contestId}-${index}`;
+            return friendSolveCountMap[key] ?? friendSolveFromCache[key] ?? 0;
+        };
 
         const byTopic = {};
         for (const p of queue) { if (!byTopic[p.topic]) byTopic[p.topic] = []; byTopic[p.topic].push(p); }
@@ -701,8 +730,26 @@ app.post("/api/plan", requireAuth, async (req, res) => {
             if (dayProblems.length === 0) break;
             const date = new Date(today);
             date.setDate(today.getDate() + day - 1);
-            await Plan.create({ myHandle: handle, day, date, todos: dayProblems.map(p => ({ contestId: p.contestId, index: p.index, name: p.name, rating: p.rating, url: p.url, topic: p.topic, done: false })) });
-            planResult.push({ day, date, focus: [...new Set(dayProblems.map(p => p.topic))].join(" + "), problemCount: dayProblems.length, problems: dayProblems.map(p => ({ contestId: p.contestId, index: p.index, name: p.name, rating: p.rating, topic: p.topic, url: p.url, friendSolveCount: friendSolveCountMap[`${p.contestId}-${p.index}`] || 0, score: p.score || 0 })) });
+            await Plan.create({
+                myHandle: handle, day, date,
+                todos: dayProblems.map(p => ({
+                    contestId: p.contestId, index: p.index, name: p.name,
+                    rating: p.rating, url: p.url, topic: p.topic, done: false,
+                    friendSolveCount: getFriendCount(p.contestId, p.index),
+                    score: p.score || 0,
+                }))
+            });
+            planResult.push({
+                day, date,
+                focus: [...new Set(dayProblems.map(p => p.topic))].join(" + "),
+                problemCount: dayProblems.length,
+                problems: dayProblems.map(p => ({
+                    contestId: p.contestId, index: p.index, name: p.name,
+                    rating: p.rating, topic: p.topic, url: p.url,
+                    friendSolveCount: getFriendCount(p.contestId, p.index),
+                    score: p.score || 0,
+                }))
+            });
         }
         res.json({ success: true, totalDays: planResult.length, problemsPerDay: PROBLEMS_PER_DAY, totalProblems: interleaved.length, plan: planResult });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -754,8 +801,20 @@ app.post("/api/queue/add", requireAuth, async (req, res) => {
     try {
         const existing = await PriorityQueue.findOne({ myHandle: handle, contestId, index });
         if (existing) return res.json({ success: true, alreadyExists: true });
+
+        // ✅ look up friendSolveCount from backlog
+        const backlogDoc = await Backlog.findOne({ myHandle: handle, contestId: Number(contestId), index });
+        const friendSolveCount = backlogDoc?.friendSolveCount || 0;
+
         const last = await PriorityQueue.findOne({ myHandle: handle }).sort({ priority: -1 });
-        await PriorityQueue.create({ myHandle: handle, contestId: Number(contestId), index, name, rating, tags: tags || [], topic: topic || "backlog", priority: last ? last.priority + 1 : 1, url: url || `https://codeforces.com/problemset/problem/${contestId}/${index}`, done: false, fromBacklog: true });
+        await PriorityQueue.create({
+            myHandle: handle, contestId: Number(contestId), index, name, rating,
+            tags: tags || [], topic: topic || "backlog",
+            priority: last ? last.priority + 1 : 1,
+            url: url || `https://codeforces.com/problemset/problem/${contestId}/${index}`,
+            done: false, fromBacklog: true,
+            friendSolveCount, // ✅
+        });
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
