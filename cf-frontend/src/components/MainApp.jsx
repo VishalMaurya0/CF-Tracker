@@ -74,7 +74,7 @@ export default function MainApp({ API, api, user, setUser, onLogout }) {
                         setHasBacklogAdditions={setHasBacklogAdditions} />
                 )}
                 {section === "backlog" && (
-                    <BacklogPanel API={API} api={api} user={user}
+                    <BacklogPanel API={API} api={api} user={user} analysis={analysis}
                         onAddedToQueue={() => setHasBacklogAdditions(true)} />
                 )}
             </div>

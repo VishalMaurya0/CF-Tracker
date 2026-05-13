@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 
 const PAGE_SIZE = 20;
 
-export default function BacklogPanel({ API, api, user, onAddedToQueue }) {
+export default function BacklogPanel({ API, api, user, analysis, onAddedToQueue }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -95,11 +95,13 @@ export default function BacklogPanel({ API, api, user, onAddedToQueue }) {
   const addToQueue = async (p) => {
     const key = `${p.contestId}-${p.index}`;
     setAdding(prev => ({ ...prev, [key]: true }));
+    const weakTopicNames = analysis.weakTopics.map(t => t.topic);
+    const practiceRating = user.practiceRating;
     try {
       await api.post(`${API}/api/queue/add`, {
         contestId: p.contestId, index: p.index,
-        name: p.name, rating: p.rating, tags: p.tags,
-        topic: p.tags?.[0] || "backlog", url: p.url,
+        name: p.name, rating: p.rating, practiceRating, tags: p.tags,
+        topic: p.tags?.[0] || "backlog", url: p.url, weakTopicNames,
       });
       setQueuedKeys(prev => new Set([...prev, key]));
       onAddedToQueue();

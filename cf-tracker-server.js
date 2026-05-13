@@ -796,7 +796,7 @@ app.post("/api/verify", requireAuth, async (req, res) => {
 });
 
 app.post("/api/queue/add", requireAuth, async (req, res) => {
-    const { contestId, index, name, rating, tags, topic, url } = req.body;
+    const { contestId, index, name, rating, practiceRating, tags, topic, weakTopicNames, url } = req.body;
     const handle = req.userHandle;
     try {
         const existing = await PriorityQueue.findOne({ myHandle: handle, contestId, index });
@@ -806,6 +806,10 @@ app.post("/api/queue/add", requireAuth, async (req, res) => {
         const backlogDoc = await Backlog.findOne({ myHandle: handle, contestId: Number(contestId), index });
         const friendSolveCount = backlogDoc?.friendSolveCount || 0;
 
+        const weakTopicsCovered = (backlogDoc?.tags || []).filter(t => weakTopicNames.includes(t));
+        const ratingBonus = backlogDoc?.rating ? Math.max(0, 10 - Math.floor(Math.abs(backlogDoc?.rating - practiceRating) / 50)) : 0;
+        const score = (weakTopicsCovered.length * 10) + ratingBonus + (friendSolveCount || 0) * 5;
+
         const last = await PriorityQueue.findOne({ myHandle: handle }).sort({ priority: -1 });
         await PriorityQueue.create({
             myHandle: handle, contestId: Number(contestId), index, name, rating,
@@ -813,6 +817,7 @@ app.post("/api/queue/add", requireAuth, async (req, res) => {
             priority: last ? last.priority + 1 : 1,
             url: url || `https://codeforces.com/problemset/problem/${contestId}/${index}`,
             done: false, fromBacklog: true,
+            score,
             friendSolveCount, // ✅
         });
         res.json({ success: true });
