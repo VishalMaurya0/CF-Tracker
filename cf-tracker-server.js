@@ -644,7 +644,7 @@ Respond ONLY with valid JSON:
                 const weakTopicsCovered = p.tags.filter(t => weakTopicNames.includes(t));
                 const ratingBonus = Math.max(0, 10 - Math.floor(Math.abs(p.rating - practiceRating) / 50));
                 const score = (weakTopicsCovered.length * 10) + ratingBonus + (friendSolveCountMap[key] || 0) * 5;
-                allCandidates.push({ key, contestId: p.contestId, index: p.index, name: p.name, rating: p.rating, tags: p.tags, primaryTopic: tag, score });
+                allCandidates.push({ key, contestId: p.contestId, index: p.index, name: p.name, rating: p.rating, tags: p.tags, primaryTopic: tag, url: `https://codeforces.com/problemset/problem/${p.contestId}/${p.index}`,  score });
             }
         }
 
